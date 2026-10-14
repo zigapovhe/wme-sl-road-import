@@ -284,10 +284,19 @@
     return { minLon, minLat, maxLon, maxLat };
   }
 
+  // WME segment geometries with their boxes, computed once per coverage refresh rather
+  // than once per cadastre line: the refresh runs on every pan.
+  function prepareSegments(segmentLines) {
+    return segmentLines
+      .filter(seg => Array.isArray(seg) && seg.length >= 2)
+      .map(coords => ({ coords, box: bboxOf(coords) }));
+  }
+
   // Share of the line, 0..1, that has a WME segment within maxDistM. Sampled rather
   // than measured as overlap, so a WME road drawn a few metres off the cadastre (the
   // usual case) still counts, and a road that merely crosses the line does not.
-  function coverageFraction(coords, segmentLines, stepM, maxDistM) {
+  // segments come from prepareSegments.
+  function coverageFraction(coords, segments, stepM, maxDistM) {
     if (coords.length < 2) return 0;
 
     // Segments wholly outside the line's box, grown by maxDistM, cannot cover any
@@ -299,9 +308,7 @@
     const project = makeLocalProjection(coords[0]);
 
     const edges = [];
-    for (const seg of segmentLines) {
-      if (!Array.isArray(seg) || seg.length < 2) continue;
-      const b = bboxOf(seg);
+    for (const { coords: seg, box: b } of segments) {
       if (b.maxLon < box.minLon - padLon || b.minLon > box.maxLon + padLon
         || b.maxLat < box.minLat - padLat || b.minLat > box.maxLat + padLat) continue;
       const sp = seg.map(project);
@@ -534,12 +541,12 @@
 
     // Imported lines are left out: they stay drawn as a record of what was added.
     function refreshCoverage() {
-      const segmentLines = wmeSDK.DataModel.Segments.getAll()
-        .map(s => s.geometry && s.geometry.coordinates);
+      const segments = prepareSegments(wmeSDK.DataModel.Segments.getAll()
+        .map(s => s.geometry && s.geometry.coordinates));
       covered.clear();
       for (const line of lines.values()) {
         if (imported.has(line.id)) continue;
-        const f = coverageFraction(line.coords, segmentLines, COVERAGE_STEP_M, COVERAGE_MAX_DISTANCE_M);
+        const f = coverageFraction(line.coords, segments, COVERAGE_STEP_M, COVERAGE_MAX_DISTANCE_M);
         if (f >= COVERAGE_HIDE_FRACTION) covered.add(line.id);
       }
     }
@@ -889,6 +896,7 @@
       splitLines,
       simplifyLine,
       lineLengthM,
+      prepareSegments,
       coverageFraction,
       buildItemsUrl,
       buildRoadLines,
