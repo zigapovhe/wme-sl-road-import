@@ -22,6 +22,64 @@
 (function () {
   'use strict';
 
+  const CADASTRE_API = 'https://ipi.eprostor.gov.si/wfs-si-gurs-kgi/ogc/features/collections/SI.GURS.KGI:LINIJE_CESTE_G/items';
+  const CADASTRE_LIMIT = 1000;
+  const CADASTRE_MAX_PAGES = 30;
+
+  // Same retry policy as the HN importer: eProstor times out at random, and the
+  // per-load budget bounds how long a sick server can keep a load spinning.
+  const FETCH_TIMEOUT_MS = 30000;
+  const FETCH_PAGE_RETRIES = 2;                 // 3 attempts per page
+  const FETCH_RETRY_BACKOFF_MS = [1000, 3000];
+  const FETCH_RETRY_BUDGET = 4;                 // retries per load, across all pages
+
+  // Coverage only sees segments WME has loaded, so loading below this zoom would
+  // show roads WME has but hasn't fetched.
+  const MIN_LOAD_ZOOM = 16;
+  const SIMPLIFY_TOLERANCE_M = 2;
+  const COVERAGE_STEP_M = 5;
+  const COVERAGE_MAX_DISTANCE_M = 15;
+  const COVERAGE_HIDE_FRACTION = 0.8;
+
+  const TOAST_COLORS = {
+    info:    { bg: '#e7f1ff', border: '#5b9bd5', text: '#12385e' },
+    success: { bg: '#d4edda', border: '#28a745', text: '#155724' },
+    warning: { bg: '#fff3cd', border: '#ffc107', text: '#7a5b00' },
+    error:   { bg: '#f8d7da', border: '#dc3545', text: '#721c24' }
+  };
+  const TOAST_TIMEOUT_MS = 4000;
+
+  // Plain DOM because the SDK has no notifications API.
+  let toastHost = null;
+  const toast = (msg, type = 'info') => {
+    console.info(`[SL-ROAD] ${msg}`);
+    try {
+      if (!toastHost) {
+        toastHost = document.createElement('div');
+        toastHost.style.cssText = 'position:fixed;top:70px;right:16px;z-index:10001;'
+          + 'display:flex;flex-direction:column;gap:6px;align-items:flex-end;'
+          + 'pointer-events:none;max-width:340px;';
+        document.body.appendChild(toastHost);
+      }
+
+      const colors = TOAST_COLORS[type] || TOAST_COLORS.info;
+      const el = document.createElement('div');
+      el.textContent = msg;
+      el.style.cssText = `background:${colors.bg};border:1px solid ${colors.border};`
+        + `color:${colors.text};border-radius:4px;padding:8px 12px;font-size:12px;`
+        + 'box-shadow:0 2px 6px rgba(0,0,0,0.2);opacity:0;transition:opacity 150ms;';
+      toastHost.appendChild(el);
+      requestAnimationFrame(() => { el.style.opacity = '1'; });
+
+      setTimeout(() => {
+        el.style.opacity = '0';
+        setTimeout(() => el.remove(), 200);
+      }, TOAST_TIMEOUT_MS);
+    } catch (e) {
+      console.debug('[SL-ROAD] toast render failed:', e);
+    }
+  };
+
   // Waze road type ids, from the SDK's ROAD_TYPE constant. Literals, because the
   // constant is a module export in the SDK typings, not something on the instance.
   // Also the order of the road type dropdown.
@@ -235,6 +293,173 @@
     return near / samples.length;
   }
 
+  function buildItemsUrl(bbox, startIndex) {
+    return CADASTRE_API
+      + '?f=application/json'
+      + '&limit=' + CADASTRE_LIMIT
+      + '&startIndex=' + startIndex
+      + '&bbox=' + [bbox.minLon, bbox.minLat, bbox.maxLon, bbox.maxLat].join(',');
+  }
+
+  // Cadastre features to drawable, clickable lines. Ids use EID_LINIJA, a string:
+  // FEATUREID is a number above 2^53, so JSON.parse rounds it and distinct lines
+  // collide. Repeats are dropped, since paging over a live table can return a row
+  // twice and two map features with one id would make clicks hit the wrong line.
+  function buildRoadLines(apiFeatures) {
+    const lines = [];
+    const seen = new Set();
+    for (const f of apiFeatures) {
+      const category = f?.properties?.GJI_ATR1_SIFRA;
+      if (categoryInfo(category).excluded) continue;
+      const eid = f?.properties?.EID_LINIJA ?? f?.id;
+      if (eid == null) continue;
+      splitLines(f.geometry).forEach((part, i) => {
+        const id = `${eid}-${i}`;
+        if (seen.has(id)) return;
+        seen.add(id);
+        const coords = simplifyLine(part, SIMPLIFY_TOLERANCE_M);
+        lines.push({ id, eid: String(eid), category, coords, lengthM: lineLengthM(coords) });
+      });
+    }
+    return lines;
+  }
+
+  // What went wrong with one page request, and is it worth another attempt?
+  //   kind:   'timeout' | 'error' | 'load'  (which GM_xmlhttpRequest handler fired)
+  //   status: HTTP status when there is one
+  // `reason` completes the sentence "eProstor ...".
+  function classifyFetchFailure(kind, status) {
+    if (kind === 'timeout') return { retryable: true, reason: 'timed out' };
+    if (kind === 'error') return { retryable: true, reason: 'request failed' };
+    if (typeof status === 'number' && status >= 500) {
+      return { retryable: true, reason: 'returned a server error' };
+    }
+    if (typeof status === 'number' && status >= 400) {
+      // Our query is what it objects to, so repeating it verbatim cannot help.
+      return { retryable: false, reason: `rejected the request (HTTP ${status})` };
+    }
+    return { retryable: false, reason: 'returned an unreadable response' };
+  }
+
+  //   'retry'   same page, same startIndex, after a backoff
+  //   'partial' stop, keep the pages that did arrive (complete: false)
+  //   'fail'    stop with nothing to keep
+  function decideFetchRetry({ retryable, attempt, retriesUsed, haveFeatures }) {
+    if (retryable && attempt <= FETCH_PAGE_RETRIES && retriesUsed < FETCH_RETRY_BUDGET) {
+      return 'retry';
+    }
+    return haveFeatures ? 'partial' : 'fail';
+  }
+
+  // Clamped, so the table can be shorter than the retry count.
+  function fetchRetryDelay(attempt) {
+    const i = Math.max(0, Math.min(attempt - 1, FETCH_RETRY_BACKOFF_MS.length - 1));
+    return FETCH_RETRY_BACKOFF_MS[i];
+  }
+
+  // Cadastre roads in bbox, page by page. shouldAbort is checked between pages and
+  // after each backoff, so a Clear or a newer Load stops the chain.
+  //
+  // Resolves { features, complete }. complete is false when the page cap was hit or a
+  // page failed after earlier ones arrived. Rejects with err.userMessage when nothing
+  // loaded.
+  function fetchCadastre(bbox, shouldAbort) {
+    return new Promise((resolve, reject) => {
+      const allFeatures = [];
+      let startIndex = 0;
+      let pageCount = 0;
+      let retriesUsed = 0;
+
+      const aborted = () => typeof shouldAbort === 'function' && shouldAbort();
+
+      function handleFailure(attempt, kind, status) {
+        const { retryable, reason } = classifyFetchFailure(kind, status);
+        const verdict = decideFetchRetry({
+          retryable, attempt, retriesUsed, haveFeatures: allFeatures.length > 0
+        });
+
+        if (verdict === 'retry') {
+          retriesUsed++;
+          toast(
+            `eProstor ${reason}, retrying (attempt ${attempt + 1} of ${FETCH_PAGE_RETRIES + 1})`,
+            'warning'
+          );
+          setTimeout(() => {
+            if (aborted()) { resolve({ features: allFeatures, complete: false }); return; }
+            requestPage(attempt + 1);
+          }, fetchRetryDelay(attempt));
+          return;
+        }
+
+        if (verdict === 'partial') {
+          console.warn(`[SL-ROAD] eProstor ${reason}; result is partial`);
+          toast(`eProstor ${reason}, showing the ${allFeatures.length} roads that loaded`, 'warning');
+          resolve({ features: allFeatures, complete: false });
+          return;
+        }
+
+        const err = new Error(`eProstor ${reason}`);
+        err.userMessage = `eProstor ${reason}, no roads loaded`;
+        reject(err);
+      }
+
+      function requestPage(attempt) {
+        if (aborted()) {
+          resolve({ features: allFeatures, complete: false });
+          return;
+        }
+        // Counted per page, not per attempt: a retry re-fetches the same startIndex.
+        if (attempt === 1 && ++pageCount > CADASTRE_MAX_PAGES) {
+          console.warn(`[SL-ROAD] cadastre result truncated at ${CADASTRE_MAX_PAGES} pages`);
+          toast('Too many roads in view, result truncated. Zoom in.', 'warning');
+          resolve({ features: allFeatures, complete: false });
+          return;
+        }
+
+        GM_xmlhttpRequest({
+          method: 'GET',
+          url: buildItemsUrl(bbox, startIndex),
+          timeout: FETCH_TIMEOUT_MS,
+          onload: function (response) {
+            let data;
+            try {
+              data = JSON.parse(response.responseText);
+            } catch (err) {
+              handleFailure(attempt, 'load', response.status);
+              return;
+            }
+            if (!data.features || !Array.isArray(data.features)) {
+              handleFailure(attempt, 'load', response.status);
+              return;
+            }
+
+            allFeatures.push(...data.features);
+
+            const returned = data.numberReturned || data.features.length;
+            const total = typeof data.numberMatched === 'number' ? data.numberMatched : null;
+            const hasMore = total != null
+              ? startIndex + returned < total
+              : returned >= CADASTRE_LIMIT;
+            if (hasMore && returned > 0) {
+              startIndex += returned;
+              requestPage(1);
+            } else {
+              resolve({ features: allFeatures, complete: true });
+            }
+          },
+          onerror: function () {
+            handleFailure(attempt, 'error');
+          },
+          ontimeout: function () {
+            handleFailure(attempt, 'timeout');
+          }
+        });
+      }
+
+      requestPage(1);
+    });
+  }
+
   // Test-only surface. `module` does not exist in Tampermonkey, so this is a no-op
   // there. Only pure functions are exposed.
   if (typeof module !== 'undefined' && module.exports) {
@@ -247,7 +472,12 @@
       splitLines,
       simplifyLine,
       lineLengthM,
-      coverageFraction
+      coverageFraction,
+      buildItemsUrl,
+      buildRoadLines,
+      classifyFetchFailure,
+      decideFetchRetry,
+      fetchRetryDelay
     };
   }
 })();
