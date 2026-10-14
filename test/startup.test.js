@@ -181,3 +181,14 @@ test('reference lines have their own style', async () => {
   const rules = layers.get(LAYER).styleRules;
   assert.ok(rules.some(r => r.predicate({ state: 'reference' })), 'no style rule matches a reference line');
 });
+
+test('lines that are not clickable let the mouse through to WME', async () => {
+  // A grey line sits exactly on the segment it created, and a cyan one on a road WME
+  // already has. Catching the mouse, they stopped editors from dragging or connecting
+  // those segments.
+  const { layers } = await bootScript();
+  const styleOf = (state) => layers.get(LAYER).styleRules.filter(r => r.predicate({ state })).pop().style;
+  assert.strictEqual(styleOf('imported').pointerEvents, 'none');
+  assert.strictEqual(styleOf('reference').pointerEvents, 'none');
+  assert.notStrictEqual(styleOf('missing').pointerEvents, 'none', 'pink pieces must stay clickable');
+});

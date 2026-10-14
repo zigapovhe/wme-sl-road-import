@@ -565,6 +565,9 @@
       I18n.translations[I18n.currentLocale()].layers.name[SCRIPT_ID] = 'Quick Road Importer';
     } catch (_) {}
 
+    // Grey and cyan lines lie exactly on WME segments: the one just created, or a road
+    // WME already has. They let the mouse through, or they would catch the drags and
+    // clicks meant for those segments and their nodes.
     wmeSDK.Map.addLayer({
       layerName: SDK_LAYER_NAME,
       styleRules: [
@@ -577,11 +580,14 @@
         },
         {
           predicate: (p) => p.state === 'reference',
-          style: { strokeColor: '#00e5ff', strokeWidth: 2, strokeOpacity: 0.8 }
+          style: { strokeColor: '#00e5ff', strokeWidth: 2, strokeOpacity: 0.8, pointerEvents: 'none' }
         },
         {
           predicate: (p) => p.state === 'imported',
-          style: { strokeColor: '#888888', strokeWidth: 4, strokeOpacity: 0.5, strokeDashstyle: 'dash' }
+          style: {
+            strokeColor: '#888888', strokeWidth: 4, strokeOpacity: 0.5, strokeDashstyle: 'dash',
+            pointerEvents: 'none'
+          }
         }
       ]
     });
