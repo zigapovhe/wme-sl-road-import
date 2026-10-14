@@ -39,6 +39,7 @@ const DEFAULT_CADASTRE = { type: 'FeatureCollection', features: [FOREST, TRAIL],
 // options, read at call time so a test may change them mid-run:
 //   zoom (default 17), wmeSegments (what Segments.getAll returns),
 //   editingAllowed (default true), addSegmentThrows, updateAddressThrows,
+//   selection (what Editing.getSelection returns), segments (id -> segment for getById),
 //   cadastre: the FeatureCollection every request returns, or 'reject' for an HTTP 400.
 //   responseDelayMs: how long each request takes, a number or (requestNumber) => ms.
 async function bootScript(storage = {}, whileStubbed = null, options = {}) {
@@ -97,6 +98,8 @@ async function bootScript(storage = {}, whileStubbed = null, options = {}) {
         if (options.updateAddressThrows) throw new Error('InvalidStateError: editing not allowed');
         return undefined;
       case 'Editing.isEditingAllowed': return options.editingAllowed ?? true;
+      case 'Editing.getSelection': return options.selection ?? null;
+      case 'DataModel.Segments.getById': return (options.segments || {})[arg && arg.segmentId] ?? null;
       case 'DataModel.Countries.getTopCountry': return { id: 197, name: 'Slovenia' };
       case 'DataModel.Cities.getCity': return { id: 55, isEmpty: true };
       case 'DataModel.Streets.getStreet': return { id: 77, isEmpty: true };

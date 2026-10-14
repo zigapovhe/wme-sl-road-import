@@ -44,6 +44,9 @@
   const COVERAGE_STEP_M = 5;
   const COVERAGE_MAX_DISTANCE_M = 15;
   const MIN_PIECE_LENGTH_M = 30;
+  // Junctions are where WME and the cadastre disagree most, so a snap tolerates no
+  // match this close to either end of the segment.
+  const SNAP_END_SKIP_M = 15;
 
   const LS = {
     getLayerVisible() { return localStorage.getItem('qrsl-layer-visible') !== '0'; }, // default on
@@ -677,6 +680,7 @@
     const pieces = new Map();    // id -> the part of a line WME has no road along
     const imported = new Map();  // id -> { lineId, coords } of segments added since the last load
     let importedCount = 0;
+    let snapPreview = null;      // { segmentId, original, coords, hasHouseNumbers } awaiting a second press
     let partial = false;         // the last load hit the page cap or lost pages
     let isLoading = false;
     let currentLoadId = 0;
@@ -706,6 +710,13 @@
         {
           predicate: (p) => p.state === 'reference',
           style: { strokeColor: '#00e5ff', strokeWidth: 2, strokeOpacity: 0.8, pointerEvents: 'none' }
+        },
+        {
+          predicate: (p) => p.state === 'preview',
+          style: {
+            strokeColor: '#00ff66', strokeWidth: 4, strokeOpacity: 0.9, strokeDashstyle: 'dash',
+            pointerEvents: 'none'
+          }
         },
         {
           predicate: (p) => p.state === 'imported',
@@ -760,7 +771,8 @@
       const features = [
         ...(showMapped ? [...lines.values()].map(l => feature(`ref-${l.id}`, l.coords, 'reference')) : []),
         ...[...pieces.values()].map(p => feature(p.id, p.coords, 'missing')),
-        ...[...imported].map(([id, a]) => feature(id, a.coords, 'imported'))
+        ...[...imported].map(([id, a]) => feature(id, a.coords, 'imported')),
+        ...(snapPreview ? [feature('snap-preview', snapPreview.coords, 'preview')] : [])
       ];
       try {
         if (layerIds.length) {
@@ -779,6 +791,7 @@
       lines.clear();
       pieces.clear();
       imported.clear();
+      snapPreview = null;
       partial = false;
     }
 
@@ -800,6 +813,9 @@
             <button id="qrsl-load" class="wz-button"><span id="qrsl-load-label">Load roads in view</span> <kbd style="${KBD_STYLE}">Alt+Shift+R</kbd></button>
             <button id="qrsl-clear" class="wz-button wz-button--secondary">Clear <kbd style="${KBD_STYLE}">Alt+Shift+X</kbd></button>
           </div>
+          <div style="margin:0 0 8px 0;">
+            <button id="qrsl-snap" class="wz-button wz-button--secondary">Snap selected road to cadastre <kbd style="${KBD_STYLE}">Alt+Shift+G</kbd></button>
+          </div>
           <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
             <wz-checkbox id="qrsl-toggle">Show layer</wz-checkbox>
             <wz-checkbox id="qrsl-show-mapped">Show already mapped roads</wz-checkbox>
@@ -813,6 +829,7 @@
       const btnLoad      = tabPane.querySelector('#qrsl-load');
       const btnLoadLabel = tabPane.querySelector('#qrsl-load-label');
       const btnClear     = tabPane.querySelector('#qrsl-clear');
+      const btnSnap      = tabPane.querySelector('#qrsl-snap');
       const chkVis       = tabPane.querySelector('#qrsl-toggle');
       const chkMapped    = tabPane.querySelector('#qrsl-show-mapped');
       const selRoadType  = tabPane.querySelector('#qrsl-roadtype');
@@ -1030,12 +1047,91 @@
 
       wmeSDK.Events.on({ eventName: 'wme-layer-feature-clicked', eventHandler: onPieceClicked });
 
-      ['qrsl-load', 'qrsl-clear'].forEach(id => {
+      function selectedSegmentId() {
+        const sel = wmeSDK.Editing.getSelection();
+        return sel && sel.objectType === 'segment' && sel.ids.length === 1 ? sel.ids[0] : null;
+      }
+
+      // First press draws the snapped shape, a second press on the same, unchanged
+      // segment applies it. Anything else starts over with a fresh preview.
+      function snapSelected() {
+        const segmentId = selectedSegmentId();
+        const segment = segmentId == null ? null : wmeSDK.DataModel.Segments.getById({ segmentId });
+        const coords = segment && segment.geometry && segment.geometry.coordinates;
+        if (!coords) {
+          toast('Select one road segment to snap', 'warning');
+          return;
+        }
+
+        if (snapPreview && snapPreview.segmentId === segmentId
+          && JSON.stringify(snapPreview.original) === JSON.stringify(coords)) {
+          applySnap();
+          return;
+        }
+
+        if (!lines.size) {
+          toast('Load roads in view first', 'warning');
+          return;
+        }
+        const snapped = snapToCadastre(coords, [...lines.values()].map(l => l.coords),
+          COVERAGE_STEP_M, COVERAGE_MAX_DISTANCE_M, SNAP_END_SKIP_M, SIMPLIFY_TOLERANCE_M);
+        if (!snapped) {
+          snapPreview = null;
+          render();
+          toast('The cadastre doesn\'t run along this whole segment, nothing to snap to', 'warning');
+          return;
+        }
+        snapPreview = {
+          segmentId,
+          original: coords.map(p => p.slice()),
+          coords: snapped,
+          hasHouseNumbers: !!segment.hasHouseNumbers
+        };
+        render();
+        toast(`Preview in green: ${snapped.length - 2} geometry nodes. Press Snap again to apply.`, 'info');
+      }
+
+      function applySnap() {
+        const { segmentId, coords, hasHouseNumbers } = snapPreview;
+        if (!wmeSDK.Editing.isEditingAllowed()) {
+          toast('Editing is not allowed here', 'warning');
+          return;
+        }
+        snapPreview = null;
+        render();
+        try {
+          wmeSDK.DataModel.Segments.updateSegment({ segmentId, geometry: { type: 'LineString', coordinates: coords } });
+        } catch (e) {
+          console.error('[SL-ROAD] snapping failed:', e);
+          toast(`Could not snap the segment: ${e.message || e}`, 'error');
+          return;
+        }
+        if (hasHouseNumbers) {
+          toast(`Snapped, ${coords.length - 2} geometry nodes. It has house numbers, check them.`, 'warning');
+        } else {
+          toast(`Snapped, ${coords.length - 2} geometry nodes`, 'success');
+        }
+      }
+
+      btnSnap.addEventListener('click', () => snapSelected());
+
+      wmeSDK.Events.on({
+        eventName: 'wme-selection-changed',
+        eventHandler: () => {
+          if (snapPreview && selectedSegmentId() !== snapPreview.segmentId) {
+            snapPreview = null;
+            render();
+          }
+        }
+      });
+
+      ['qrsl-load', 'qrsl-clear', 'qrsl-snap'].forEach(id => {
         try { wmeSDK.Shortcuts.deleteShortcut({ shortcutId: id }); } catch (_) {}
       });
       [
         { shortcutId: 'qrsl-load',  shortcutKeys: 'AS+r', description: 'SL-ROAD: Load roads in view', callback: () => loadRoads() },
-        { shortcutId: 'qrsl-clear', shortcutKeys: 'AS+x', description: 'SL-ROAD: Clear',              callback: () => clearRoads() }
+        { shortcutId: 'qrsl-clear', shortcutKeys: 'AS+x', description: 'SL-ROAD: Clear',              callback: () => clearRoads() },
+        { shortcutId: 'qrsl-snap',  shortcutKeys: 'AS+g', description: 'SL-ROAD: Snap selected road to cadastre', callback: () => snapSelected() }
       ].forEach(spec => {
         try { wmeSDK.Shortcuts.createShortcut(spec); }
         catch (e) { console.warn('[SL-ROAD] failed to register shortcut', spec.shortcutId, e); }
@@ -1055,6 +1151,7 @@
       // Anything in `required` aborts startup.
       const required = [
         'DataModel.Segments.getAll',
+        'DataModel.Segments.getById',
         'DataModel.Segments.addSegment',
         'DataModel.Segments.updateSegment',
         'DataModel.Segments.updateAddress',
@@ -1064,6 +1161,7 @@
         'DataModel.Streets.getStreet',
         'DataModel.Streets.addStreet',
         'Editing.setSelection',
+        'Editing.getSelection',
         'Editing.isEditingAllowed',
         'Events.on',
         'Events.once',

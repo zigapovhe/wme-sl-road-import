@@ -41,6 +41,12 @@ Only the parts of a cadastre road with no WME road running alongside them (withi
 
 This only sees what WME has loaded, which is why loading needs zoom 16. When WME loads more map data, the check runs again.
 
+## Snapping an existing road
+
+To move an existing WME road onto the cadastre geometry, select one segment and click **Snap selected road to cadastre** (or press `Alt+Shift+G`). The new shape is drawn as a green dashed preview. Press again to apply it, or select something else to drop it.
+
+The segment's two end nodes never move, so its connections stay as they are. Only the points in between are replaced with the cadastre's, bends included. It works across cadastre junctions and whichever way the cadastre is drawn. If the cadastre doesn't run along the whole segment (apart from the first and last 15 m), nothing is snapped. If the segment has house numbers, check them afterwards. WME's undo reverts a snap.
+
 ## Options
 
 - Show layer (on by default)
@@ -53,6 +59,7 @@ This only sees what WME has loaded, which is why loading needs zoom 16. When WME
 |----------|--------|
 | `Alt+Shift+R` | Load roads in view |
 | `Alt+Shift+X` | Clear |
+| `Alt+Shift+G` | Snap selected road to cadastre (press twice: preview, then apply) |
 
 You can reassign them in WME's keyboard shortcuts dialog.
 
