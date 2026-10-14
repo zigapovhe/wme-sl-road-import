@@ -171,6 +171,70 @@
     return len;
   }
 
+  // Points every stepM metres along pts (already in metres), both ends included.
+  function sampleAlong(pts, stepM) {
+    const out = [pts[0]];
+    let carry = 0; // distance walked since the last sample
+    for (let i = 1; i < pts.length; i++) {
+      const [ax, ay] = pts[i - 1];
+      const [bx, by] = pts[i];
+      const len = Math.hypot(bx - ax, by - ay);
+      let d = stepM - carry;
+      while (d <= len) {
+        const t = d / len;
+        out.push([ax + t * (bx - ax), ay + t * (by - ay)]);
+        d += stepM;
+      }
+      carry = len - (d - stepM);
+    }
+    out.push(pts[pts.length - 1]);
+    return out;
+  }
+
+  function bboxOf(coords) {
+    let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
+    for (const [lon, lat] of coords) {
+      if (lon < minLon) minLon = lon;
+      if (lon > maxLon) maxLon = lon;
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+    }
+    return { minLon, minLat, maxLon, maxLat };
+  }
+
+  // Share of the line, 0..1, that has a WME segment within maxDistM. Sampled rather
+  // than measured as overlap, so a WME road drawn a few metres off the cadastre (the
+  // usual case) still counts, and a road that merely crosses the line does not.
+  function coverageFraction(coords, segmentLines, stepM, maxDistM) {
+    if (coords.length < 2) return 0;
+
+    // Segments wholly outside the line's box, grown by maxDistM, cannot cover any
+    // sample. Checked in degrees so the thousands of far segments in a view are
+    // never projected.
+    const box = bboxOf(coords);
+    const padLon = maxDistM / metresPerDegLon(coords[0][1]);
+    const padLat = maxDistM / M_PER_DEG_LAT;
+    const project = makeLocalProjection(coords[0]);
+
+    const edges = [];
+    for (const seg of segmentLines) {
+      if (!Array.isArray(seg) || seg.length < 2) continue;
+      const b = bboxOf(seg);
+      if (b.maxLon < box.minLon - padLon || b.minLon > box.maxLon + padLon
+        || b.maxLat < box.minLat - padLat || b.minLat > box.maxLat + padLat) continue;
+      const sp = seg.map(project);
+      for (let i = 1; i < sp.length; i++) edges.push([sp[i - 1], sp[i]]);
+    }
+    if (!edges.length) return 0;
+
+    const samples = sampleAlong(coords.map(project), stepM);
+    let near = 0;
+    for (const s of samples) {
+      if (edges.some(([a, b]) => pointToSegmentDistance(s, a, b) <= maxDistM)) near++;
+    }
+    return near / samples.length;
+  }
+
   // Test-only surface. `module` does not exist in Tampermonkey, so this is a no-op
   // there. Only pure functions are exposed.
   if (typeof module !== 'undefined' && module.exports) {
@@ -182,7 +246,8 @@
       describeLine,
       splitLines,
       simplifyLine,
-      lineLengthM
+      lineLengthM,
+      coverageFraction
     };
   }
 })();
