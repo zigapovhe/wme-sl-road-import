@@ -731,6 +731,78 @@
         }
       });
 
+      // The empty street with no city, in the country WME is centred on.
+      function setEmptyAddress(segmentId) {
+        const country = wmeSDK.DataModel.Countries.getTopCountry();
+        if (!country) throw new Error('WME has no top country here');
+        const countryId = country.id;
+        const city = wmeSDK.DataModel.Cities.getCity({ cityName: '', countryId })
+          || wmeSDK.DataModel.Cities.addCity({ cityName: '', countryId });
+        const street = wmeSDK.DataModel.Streets.getStreet({ streetName: '', cityId: city.id })
+          || wmeSDK.DataModel.Streets.addStreet({ streetName: '', cityId: city.id });
+        wmeSDK.DataModel.Segments.updateAddress({ segmentId, addressData: { primaryStreetId: street.id } });
+      }
+
+      // One click, one segment. Junctions and connections are the editor's job.
+      function onLineClicked({ featureId, layerName } = {}) {
+        if (layerName !== SDK_LAYER_NAME) return;
+        const line = lines.get(String(featureId));
+        if (!line || imported.has(line.id) || covered.has(line.id)) return;
+        if (!wmeSDK.Editing.isEditingAllowed()) {
+          toast('Editing is not allowed here', 'warning');
+          return;
+        }
+
+        const { roadType, unpaved } = planSegment(line, overrideRoadType);
+        let segmentId;
+        try {
+          segmentId = wmeSDK.DataModel.Segments.addSegment({
+            geometry: { type: 'LineString', coordinates: line.coords },
+            roadType
+          });
+        } catch (e) {
+          console.error('[SL-ROAD] addSegment failed:', e);
+          toast(`Could not create the segment: ${e.message || e}`, 'error');
+          return;
+        }
+        // From here on the segment exists, so a second click must not make another.
+        imported.add(line.id);
+
+        const failed = [];
+        try {
+          // The default direction of a new segment is undocumented, so always set it.
+          wmeSDK.DataModel.Segments.updateSegment(unpaved
+            ? { segmentId, direction: 'TWO_WAY', flagAttributes: { unpaved: true } }
+            : { segmentId, direction: 'TWO_WAY' });
+        } catch (e) {
+          console.error('[SL-ROAD] updateSegment failed:', e);
+          failed.push(unpaved ? 'direction and unpaved' : 'direction');
+        }
+        try {
+          setEmptyAddress(segmentId);
+        } catch (e) {
+          console.error('[SL-ROAD] setting the address failed:', e);
+          failed.push('address');
+        }
+        try {
+          wmeSDK.Editing.setSelection({ selection: { ids: [segmentId], objectType: 'segment' } });
+        } catch (e) {
+          console.error('[SL-ROAD] selecting the new segment failed:', e);
+          failed.push('selection');
+        }
+
+        render();
+        updateStatus();
+        const what = `${roadTypeName(roadType)}, ${Math.round(line.lengthM)} m`;
+        if (failed.length) {
+          toast(`${what} created, but setting ${failed.join(', ')} failed. Fix it by hand.`, 'warning');
+        } else {
+          toast(`${what} created`, 'success');
+        }
+      }
+
+      wmeSDK.Events.on({ eventName: 'wme-layer-feature-clicked', eventHandler: onLineClicked });
+
       ['qrsl-load', 'qrsl-clear'].forEach(id => {
         try { wmeSDK.Shortcuts.deleteShortcut({ shortcutId: id }); } catch (_) {}
       });
