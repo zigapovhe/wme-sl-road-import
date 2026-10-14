@@ -336,6 +336,10 @@
   const ALONGSIDE_MAX_ANGLE_DEG = 45;
   const ALONGSIDE_MIN_COS2 = Math.cos(ALONGSIDE_MAX_ANGLE_DEG * Math.PI / 180) ** 2;
 
+  // A snap needs the cadastre alongside at least this share of the segment's samples.
+  // Less, and the line matching at both ends is probably a different road between them.
+  const SNAP_MIN_MATCHED = 0.5;
+
   // Whether direction u and the edge a-b are within ALONGSIDE_MAX_ANGLE_DEG of each
   // other, either way round.
   function isAlongside(u, [ax, ay], [bx, by]) {
@@ -423,8 +427,13 @@
   // cadastre edge running alongside within maxDistM. It keeps to the same cadastre
   // line while that still qualifies, so a road between two carriageways doesn't
   // zigzag, and keeps the cadastre's own vertices between matches, so bends keep their
-  // shape. Returns null when a sample further than endSkipM from both ends has no
-  // match: half a snap is worse than none.
+  // shape. Where WME drew a bend too far off for any match, the cadastre's own
+  // geometry between the matches on either side fills the gap.
+  //
+  // Returns null, since half a snap is worse than none, when the segment's first or
+  // last match is more than endSkipM from its end, when under SNAP_MIN_MATCHED of it
+  // matches (probably a different road), or when it would jump between cadastre lines
+  // that don't meet.
   function snapToCadastre(segCoords, cadastreLines, stepM, maxDistM, endSkipM, toleranceM) {
     if (segCoords.length < 2) return null;
     const project = makeLocalProjection(segCoords[0]);
@@ -448,7 +457,8 @@
 
     const matches = [];
     let current = null;
-    for (const d of sampleDistances(total, stepM)) {
+    const ds = sampleDistances(total, stepM);
+    for (const d of ds) {
       const i = edgeAt(segCum, d);
       const dir = [segPts[i][0] - segPts[i - 1][0], segPts[i][1] - segPts[i - 1][1]];
       const p = project(pointAlong(segCoords, segCum, d));
@@ -468,13 +478,14 @@
       }
       const m = bestOnCurrent || best;
       if (!m) {
-        if (d > endSkipM && d < total - endSkipM) return null;
+        if (!matches.length && d > endSkipM) return null;
         continue;
       }
       current = m.line;
-      matches.push(m);
+      matches.push({ ...m, d });
     }
-    if (!matches.length) return null;
+    if (!matches.length || matches[matches.length - 1].d < total - endSkipM) return null;
+    if (matches.length < SNAP_MIN_MATCHED * ds.length) return null;
 
     const out = [segCoords[0]];
     let prev = null;
@@ -493,11 +504,10 @@
             if (dist <= maxDistM && (!joint || dist < joint.dist)) joint = { a, b, dist };
           }
         }
-        if (joint) {
-          out.push(...verticesBetween(prev.line, prev.pos, joint.a.pos, false));
-          out.push(pointAlong(prev.line.coords, prev.line.cum, joint.a.pos));
-          out.push(...verticesBetween(m.line, joint.b.pos, m.pos, true));
-        }
+        if (!joint) return null;
+        out.push(...verticesBetween(prev.line, prev.pos, joint.a.pos, false));
+        out.push(pointAlong(prev.line.coords, prev.line.cum, joint.a.pos));
+        out.push(...verticesBetween(m.line, joint.b.pos, m.pos, true));
       }
       out.push(pointAlong(m.line.coords, m.line.cum, m.pos));
       prev = m;
@@ -1078,7 +1088,7 @@
         if (!snapped) {
           snapPreview = null;
           render();
-          toast('The cadastre doesn\'t run along this whole segment, nothing to snap to', 'warning');
+          toast('Couldn\'t match this segment to one cadastre road, nothing to snap to', 'warning');
           return;
         }
         snapPreview = {

@@ -108,3 +108,20 @@ test('a road between two carriageways stays on one of them', () => {
   const inner = result.slice(1, -1).map(p => Math.round(toMetres(p)[1]));
   assert.ok(inner.every(y => y === inner[0]), `zigzagged between carriageways: ${inner}`);
 });
+
+test('a bend WME drew far off the cadastre is bridged by the cadastre itself', () => {
+  // The case from WME: the segment's corner sits ~45 m from the cadastre's, so the
+  // samples around it have no cadastre within 15 m. Both sides match the same line,
+  // so the line's own geometry fills the gap.
+  const cadastre = [at(0, 0), at(100, 0), at(100, 100)];
+  const wme = [at(0, 5), at(60, 5), at(135, -35), at(105, 40), at(105, 100)];
+  const result = snap(wme, [cadastre]);
+  assertSnapped(result, wme, [cadastre]);
+  assert.ok(result.some(p => p[0] === cadastre[1][0] && p[1] === cadastre[1][1]), 'the cadastre corner is in the result');
+});
+
+test('a cadastre road that leaves the segment for most of its length is not snapped', () => {
+  // Same line at both ends, but a 200 m detour in between: a different road.
+  const detour = [at(0, 0), at(30, 0), at(100, -200), at(170, 0), at(200, 0)];
+  assert.strictEqual(snap([at(0, 5), at(200, 5)], [detour]), null);
+});
