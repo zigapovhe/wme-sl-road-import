@@ -148,3 +148,36 @@ test('a rejected request leaves the layer empty and load usable', async () => {
     assert.strictEqual(features(ctx).length, 1);
   }, { cadastre: 'reject' });
 });
+
+const FIRST_LEG = { id: 1, geometry: { type: 'LineString', coordinates: [[14.55, 46.05], [14.551, 46.05]] } };
+const REF_ID = '300200000000000017-0';
+
+test('mapped roads are not drawn unless asked for', async () => {
+  await bootScript({}, async (ctx) => {
+    await load(ctx);
+    assert.deepStrictEqual(features(ctx).map(f => f.properties.state), ['missing']);
+  }, { wmeSegments: [FIRST_LEG] });
+});
+
+test('with mapped roads on, every cadastre line is drawn whole under the pieces', async () => {
+  await bootScript({ 'qrsl-show-mapped': '1' }, async (ctx) => {
+    await load(ctx);
+    const states = features(ctx).map(f => f.properties.state);
+    assert.deepStrictEqual(states, ['reference', 'missing'], 'reference first, so pieces draw on top');
+    assert.strictEqual(features(ctx)[0].id, `ref-${REF_ID}`);
+    assert.deepStrictEqual(features(ctx)[0].geometry.coordinates, FOREST_COORDS);
+  }, { wmeSegments: [FIRST_LEG] });
+});
+
+test('a fully mapped road still shows as a reference', async () => {
+  await bootScript({ 'qrsl-show-mapped': '1' }, async (ctx) => {
+    await load(ctx);
+    assert.deepStrictEqual(features(ctx).map(f => f.properties.state), ['reference']);
+  }, { wmeSegments: [{ id: 1, geometry: { type: 'LineString', coordinates: FOREST_COORDS } }] });
+});
+
+test('reference lines have their own style', async () => {
+  const { layers } = await bootScript();
+  const rules = layers.get(LAYER).styleRules;
+  assert.ok(rules.some(r => r.predicate({ state: 'reference' })), 'no style rule matches a reference line');
+});

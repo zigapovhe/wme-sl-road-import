@@ -47,7 +47,9 @@
 
   const LS = {
     getLayerVisible() { return localStorage.getItem('qrsl-layer-visible') !== '0'; }, // default on
-    setLayerVisible(v){ localStorage.setItem('qrsl-layer-visible', v ? '1' : '0'); }
+    setLayerVisible(v){ localStorage.setItem('qrsl-layer-visible', v ? '1' : '0'); },
+    getShowMapped()   { return localStorage.getItem('qrsl-show-mapped') === '1'; },
+    setShowMapped(v)  { localStorage.setItem('qrsl-show-mapped', v ? '1' : '0'); }
   };
 
   const INSTRUCTIONS_HTML = `<b>Instructions</b><br/>
@@ -555,6 +557,7 @@
     let currentLoadId = 0;
     let overrideRoadType = null; // null = Auto from category
     let layerWanted = LS.getLayerVisible();
+    let showMapped = LS.getShowMapped();
     let layerShown = false;
     let layerIds = [];
 
@@ -571,6 +574,10 @@
             strokeColor: '#ff00ff', strokeWidth: 5, strokeOpacity: 0.85,
             hoverStrokeColor: '#ffff00', hoverStrokeWidth: 7, cursor: 'pointer'
           }
+        },
+        {
+          predicate: (p) => p.state === 'reference',
+          style: { strokeColor: '#00e5ff', strokeWidth: 2, strokeOpacity: 0.8 }
         },
         {
           predicate: (p) => p.state === 'imported',
@@ -617,7 +624,10 @@
       const feature = (id, coords, state) => ({
         type: 'Feature', id, geometry: { type: 'LineString', coordinates: coords }, properties: { state }
       });
+      // Reference lines first, so the pieces draw on top of them. They never go into
+      // `pieces`, which is what keeps them unclickable.
       const features = [
+        ...(showMapped ? [...lines.values()].map(l => feature(`ref-${l.id}`, l.coords, 'reference')) : []),
         ...[...pieces.values()].map(p => feature(p.id, p.coords, 'missing')),
         ...[...imported].map(([id, a]) => feature(id, a.coords, 'imported'))
       ];
@@ -661,6 +671,7 @@
           </div>
           <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
             <wz-checkbox id="qrsl-toggle">Show layer</wz-checkbox>
+            <wz-checkbox id="qrsl-show-mapped">Show already mapped roads</wz-checkbox>
             <label style="font-size:12px;">Road type <select id="qrsl-roadtype" style="margin-left:6px;">${typeOptions}</select></label>
           </div>
           <div id="qrsl-status" style="margin-top:10px;font-size:12px;color:#666;line-height:1.4;">${INSTRUCTIONS_HTML}</div>
@@ -672,11 +683,13 @@
       const btnLoadLabel = tabPane.querySelector('#qrsl-load-label');
       const btnClear     = tabPane.querySelector('#qrsl-clear');
       const chkVis       = tabPane.querySelector('#qrsl-toggle');
+      const chkMapped    = tabPane.querySelector('#qrsl-show-mapped');
       const selRoadType  = tabPane.querySelector('#qrsl-roadtype');
       const statusDiv    = tabPane.querySelector('#qrsl-status');
       const hoverDiv     = tabPane.querySelector('#qrsl-hover');
 
       setChecked(chkVis, layerWanted);
+      setChecked(chkMapped, showMapped);
 
       chkVis.addEventListener('click', () => {
         const on = isChecked(chkVis);
@@ -684,6 +697,14 @@
         layerWanted = !on;
         LS.setLayerVisible(!on);
         updateLayerVisibility();
+      });
+
+      chkMapped.addEventListener('click', () => {
+        const on = isChecked(chkMapped);
+        setChecked(chkMapped, !on);
+        showMapped = !on;
+        LS.setShowMapped(!on);
+        render();
       });
 
       selRoadType.addEventListener('change', () => {

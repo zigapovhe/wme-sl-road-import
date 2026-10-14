@@ -44,6 +44,7 @@ This only sees what WME has loaded, which is why loading needs zoom 16. When WME
 ## Options
 
 - Show layer (on by default)
+- Show already mapped roads (off by default): draws every loaded cadastre road as a thin cyan line under the pink ones, so you can check WME geometry against it. Cyan lines can't be clicked.
 - Road type override (resets to Auto on reload)
 
 ## Keyboard shortcuts

@@ -141,3 +141,13 @@ test('an imported road stays drawn when WME data reloads', async () => {
     assert.deepStrictEqual(features(ctx).map(f => f.properties.state), ['imported']);
   });
 });
+
+test('clicking a reference line creates nothing', async () => {
+  // Reference lines are mostly roads WME already has. Creating one would draw over them.
+  await bootScript({ 'qrsl-show-mapped': '1' }, async (ctx) => {
+    await load(ctx);
+    assert.ok(features(ctx).some(f => f.id === 'ref-300200000000000017-0'), 'the reference line is drawn');
+    click(ctx, 'ref-300200000000000017-0');
+    assert.strictEqual(argsOf(ctx.calls, 'DataModel.Segments.addSegment').length, 0);
+  }, { wmeSegments: [{ id: 1, geometry: { type: 'LineString', coordinates: FOREST_COORDS } }] });
+});
