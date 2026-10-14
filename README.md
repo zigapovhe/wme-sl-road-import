@@ -47,10 +47,15 @@ To move an existing WME road onto the cadastre geometry, select one segment and 
 
 The segment's two end nodes never move, so its connections stay as they are. Only the points in between are replaced with the cadastre's, bends included. It works across cadastre junctions and whichever way the cadastre is drawn. Where WME drew a bend far off, the cadastre's own shape fills the gap. Nothing is snapped if the cadastre runs alongside less than half of the segment, misses its first or last 15 m, or would jump between cadastre roads that don't meet. If the segment has house numbers, check them afterwards. WME's undo reverts a snap.
 
+## Disconnected ends
+
+A WME dead end within 5 m of another road it isn't connected to gets an orange ring. That's usually a junction someone meant to make and missed by a few metres, including the end of a road you just added. Connect it and the ring goes away. This only looks at WME data, so it works without loading anything. Ferries, railways and runways are ignored, since they don't connect to roads. The rings let clicks through, so you can drag the node right under one. The sidebar shows how many there are.
+
 ## Options
 
 - Show layer (on by default)
 - Show already mapped roads (off by default): draws every loaded cadastre road as a thin cyan line under the pink ones, so you can check WME geometry against it. Cyan lines can't be clicked.
+- Show disconnected ends (on by default)
 - Road type override (resets to Auto on reload)
 
 ## Keyboard shortcuts

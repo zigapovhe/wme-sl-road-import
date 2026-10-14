@@ -37,7 +37,7 @@ const DEFAULT_CADASTRE = { type: 'FeatureCollection', features: [FOREST, TRAIL],
 // whileStubbed: run after boot and before the stubs come down. Anything that calls
 // back into the script goes here.
 // options, read at call time so a test may change them mid-run:
-//   zoom (default 17), wmeSegments (what Segments.getAll returns),
+//   zoom (default 17), wmeSegments (what Segments.getAll returns), wmeNodes (Nodes.getAll),
 //   editingAllowed (default true), addSegmentThrows, updateAddressThrows,
 //   selection (what Editing.getSelection returns), segments (id -> segment for getById),
 //   cadastre: the FeatureCollection every request returns, or 'reject' for an HTTP 400.
@@ -91,6 +91,7 @@ async function bootScript(storage = {}, whileStubbed = null, options = {}) {
       case 'Sidebar.registerScriptTab':
         return Promise.resolve({ tabLabel: element(), tabPane: element() });
       case 'DataModel.Segments.getAll': return options.wmeSegments || [];
+      case 'DataModel.Nodes.getAll': return options.wmeNodes || [];
       case 'DataModel.Segments.addSegment':
         if (options.addSegmentThrows) throw new Error('InvalidStateError: not allowed to add a segment');
         return -101;

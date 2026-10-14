@@ -47,17 +47,23 @@
   // Junctions are where WME and the cadastre disagree most, so a snap tolerates no
   // match this close to either end of the segment.
   const SNAP_END_SKIP_M = 15;
+  // Further than this, a dead end next to a road is more likely a real dead end than
+  // a junction the editor missed.
+  const LOOSE_END_MAX_DISTANCE_M = 5;
 
   const LS = {
     getLayerVisible() { return localStorage.getItem('qrsl-layer-visible') !== '0'; }, // default on
     setLayerVisible(v){ localStorage.setItem('qrsl-layer-visible', v ? '1' : '0'); },
     getShowMapped()   { return localStorage.getItem('qrsl-show-mapped') === '1'; },
-    setShowMapped(v)  { localStorage.setItem('qrsl-show-mapped', v ? '1' : '0'); }
+    setShowMapped(v)  { localStorage.setItem('qrsl-show-mapped', v ? '1' : '0'); },
+    getShowLoose()    { return localStorage.getItem('qrsl-show-loose') !== '0'; },  // default on
+    setShowLoose(v)   { localStorage.setItem('qrsl-show-loose', v ? '1' : '0'); }
   };
 
   const INSTRUCTIONS_HTML = `<b>Instructions</b><br/>
     1) Zoom in to level ${MIN_LOAD_ZOOM}+ • 2) Click "Load roads in view" • 3) <b>Click a pink line to add it as a segment</b><br/>
-    Connect it to the network yourself. Grey dashed = added since the last load.`;
+    Connect it to the network yourself. Grey dashed = added since the last load.<br/>
+    Orange ring = a dead end next to a road it isn't connected to.`;
 
   const KBD_STYLE = 'margin-left:6px;font-size:10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;'
     + 'background:rgba(0,0,0,0.08);border-radius:3px;padding:2px 5px;color:#555;';
@@ -402,6 +408,45 @@
     return stretches;
   }
 
+  // Ferries, railways and runways are never joined to roads, so a road ending next to
+  // one is fine.
+  const NEVER_CONNECTED_ROAD_TYPES = new Set([15, 18, 19]);
+
+  // Dead ends (nodes with one segment) within maxDistM of another road: usually a
+  // junction the editor meant to make and missed by a few metres. Takes the SDK's
+  // segments and nodes, returns [{ nodeId, coords }].
+  function looseEnds(segments, nodes, maxDistM) {
+    const roads = [];
+    for (const s of segments) {
+      const coords = s?.geometry?.coordinates;
+      if (NEVER_CONNECTED_ROAD_TYPES.has(s?.roadType) || !Array.isArray(coords) || coords.length < 2) continue;
+      roads.push({ id: s.id, coords, box: bboxOf(coords) });
+    }
+    const roadIds = new Set(roads.map(r => r.id));
+
+    const found = [];
+    for (const n of nodes) {
+      const p = n?.geometry?.coordinates;
+      const ids = n?.connectedSegmentIds;
+      // A node whose only segment WME hasn't loaded sits at the edge of the loaded area.
+      if (!Array.isArray(p) || !Array.isArray(ids) || ids.length !== 1 || !roadIds.has(ids[0])) continue;
+      const padLon = maxDistM / metresPerDegLon(p[1]);
+      const padLat = maxDistM / M_PER_DEG_LAT;
+      const project = makeLocalProjection(p);
+      let near = false;
+      for (const r of roads) {
+        const b = r.box;
+        if (r.id === ids[0] || b.maxLon < p[0] - padLon || b.minLon > p[0] + padLon
+          || b.maxLat < p[1] - padLat || b.minLat > p[1] + padLat) continue;
+        const sp = r.coords.map(project);
+        for (let i = 1; i < sp.length && !near; i++) near = pointToSegmentDistance([0, 0], sp[i - 1], sp[i]) <= maxDistM;
+        if (near) break;
+      }
+      if (near) found.push({ nodeId: n.id, coords: [p[0], p[1]] });
+    }
+    return found;
+  }
+
   // The vertices of a projected cadastre line between two positions along it, in the
   // order of travel from one to the other. The vertex at fromM itself only when asked.
   function verticesBetween(line, fromM, toM, includeFrom) {
@@ -697,6 +742,8 @@
     let overrideRoadType = null; // null = Auto from category
     let layerWanted = LS.getLayerVisible();
     let showMapped = LS.getShowMapped();
+    let showLoose = LS.getShowLoose();
+    let looseNodes = [];         // dead ends next to a road they aren't connected to
     let layerShown = false;
     let layerIds = [];
 
@@ -705,8 +752,8 @@
     } catch (_) {}
 
     // Grey and cyan lines lie exactly on WME segments: the one just created, or a road
-    // WME already has. They let the mouse through, or they would catch the drags and
-    // clicks meant for those segments and their nodes.
+    // WME already has. Orange rings sit on WME nodes. They let the mouse through, or
+    // they would catch the drags and clicks meant for those segments and nodes.
     wmeSDK.Map.addLayer({
       layerName: SDK_LAYER_NAME,
       styleRules: [
@@ -732,6 +779,13 @@
           predicate: (p) => p.state === 'imported',
           style: {
             strokeColor: '#888888', strokeWidth: 4, strokeOpacity: 0.5, strokeDashstyle: 'dash',
+            pointerEvents: 'none'
+          }
+        },
+        {
+          predicate: (p) => p.state === 'loose',
+          style: {
+            pointRadius: 12, fill: false, strokeColor: '#ff8c00', strokeWidth: 3, strokeOpacity: 0.95,
             pointerEvents: 'none'
           }
         }
@@ -782,7 +836,11 @@
         ...(showMapped ? [...lines.values()].map(l => feature(`ref-${l.id}`, l.coords, 'reference')) : []),
         ...[...pieces.values()].map(p => feature(p.id, p.coords, 'missing')),
         ...[...imported].map(([id, a]) => feature(id, a.coords, 'imported')),
-        ...(snapPreview ? [feature('snap-preview', snapPreview.coords, 'preview')] : [])
+        ...(snapPreview ? [feature('snap-preview', snapPreview.coords, 'preview')] : []),
+        ...looseNodes.map(e => ({
+          type: 'Feature', id: `loose-${e.nodeId}`, geometry: { type: 'Point', coordinates: e.coords },
+          properties: { state: 'loose' }
+        }))
       ];
       try {
         if (layerIds.length) {
@@ -829,9 +887,11 @@
           <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
             <wz-checkbox id="qrsl-toggle">Show layer</wz-checkbox>
             <wz-checkbox id="qrsl-show-mapped">Show already mapped roads</wz-checkbox>
+            <wz-checkbox id="qrsl-show-loose">Show disconnected ends</wz-checkbox>
             <label style="font-size:12px;">Road type <select id="qrsl-roadtype" style="margin-left:6px;">${typeOptions}</select></label>
           </div>
           <div id="qrsl-status" style="margin-top:10px;font-size:12px;color:#666;line-height:1.4;">${INSTRUCTIONS_HTML}</div>
+          <div id="qrsl-loose" style="margin-top:6px;font-size:12px;color:#b35f00;"></div>
           <div id="qrsl-hover" style="margin-top:6px;font-size:12px;font-weight:bold;min-height:1.4em;"></div>
         </div>
       `;
@@ -842,12 +902,15 @@
       const btnSnap      = tabPane.querySelector('#qrsl-snap');
       const chkVis       = tabPane.querySelector('#qrsl-toggle');
       const chkMapped    = tabPane.querySelector('#qrsl-show-mapped');
+      const chkLoose     = tabPane.querySelector('#qrsl-show-loose');
       const selRoadType  = tabPane.querySelector('#qrsl-roadtype');
       const statusDiv    = tabPane.querySelector('#qrsl-status');
       const hoverDiv     = tabPane.querySelector('#qrsl-hover');
+      const looseDiv     = tabPane.querySelector('#qrsl-loose');
 
       setChecked(chkVis, layerWanted);
       setChecked(chkMapped, showMapped);
+      setChecked(chkLoose, showLoose);
 
       chkVis.addEventListener('click', () => {
         const on = isChecked(chkVis);
@@ -862,6 +925,15 @@
         setChecked(chkMapped, !on);
         showMapped = !on;
         LS.setShowMapped(!on);
+        render();
+      });
+
+      chkLoose.addEventListener('click', () => {
+        const on = isChecked(chkLoose);
+        setChecked(chkLoose, !on);
+        showLoose = !on;
+        LS.setShowLoose(!on);
+        refreshLoose();
         render();
       });
 
@@ -958,15 +1030,46 @@
       btnLoad.addEventListener('click', () => loadRoads());
       btnClear.addEventListener('click', () => clearRoads());
 
+      // WME data only, so it runs with or without a cadastre load.
+      function refreshLoose() {
+        looseNodes = showLoose
+          ? looseEnds(wmeSDK.DataModel.Segments.getAll(), wmeSDK.DataModel.Nodes.getAll(), LOOSE_END_MAX_DISTANCE_M)
+          : [];
+        const n = looseNodes.length;
+        looseDiv.textContent = n ? `${n} disconnected ${n === 1 ? 'end' : 'ends'}, ringed in orange` : '';
+      }
+
       wmeSDK.Events.on({
         eventName: 'wme-map-data-loaded',
         eventHandler: () => {
-          if (!lines.size) return;
-          refreshPieces();
+          refreshLoose();
+          if (lines.size) {
+            refreshPieces();
+            updateStatus();
+          }
           render();
-          updateStatus();
         }
       });
+
+      // Edits, including connecting a ringed end. WME fires these in bursts, one per
+      // batch of objects, so the refresh waits for the burst to end.
+      let looseTimer = null;
+      const scheduleLoose = () => {
+        clearTimeout(looseTimer);
+        looseTimer = setTimeout(() => { refreshLoose(); render(); }, 100);
+      };
+      wmeSDK.Events.trackDataModelEvents({ dataModelName: 'segments' });
+      wmeSDK.Events.trackDataModelEvents({ dataModelName: 'nodes' });
+      for (const eventName of ['wme-data-model-objects-added', 'wme-data-model-objects-changed', 'wme-data-model-objects-removed']) {
+        wmeSDK.Events.on({
+          eventName,
+          eventHandler: ({ dataModelName } = {}) => {
+            if (dataModelName === 'segments' || dataModelName === 'nodes') scheduleLoose();
+          }
+        });
+      }
+      refreshLoose();
+      render();
 
       wmeSDK.Events.on({
         eventName: 'wme-layer-feature-mouse-enter',
@@ -1165,6 +1268,7 @@
         'DataModel.Segments.addSegment',
         'DataModel.Segments.updateSegment',
         'DataModel.Segments.updateAddress',
+        'DataModel.Nodes.getAll',
         'DataModel.Countries.getTopCountry',
         'DataModel.Cities.getCity',
         'DataModel.Cities.addCity',
@@ -1176,6 +1280,7 @@
         'Events.on',
         'Events.once',
         'Events.trackLayerEvents',
+        'Events.trackDataModelEvents',
         'Sidebar.registerScriptTab',
         'Map.addLayer',
         'Map.addFeaturesToLayer',
@@ -1227,6 +1332,7 @@
       prepareSegments,
       missingStretches,
       snapToCadastre,
+      looseEnds,
       buildItemsUrl,
       buildRoadLines,
       classifyFetchFailure,
