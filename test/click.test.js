@@ -40,6 +40,24 @@ test('the click handler is registered', async () => {
   assert.ok(handlers.has('wme-layer-feature-clicked'));
 });
 
+test('a road WME has along part of its length only offers the missing part', async () => {
+  // The whole cadastre line used to be offered, and a click created it on top of the
+  // WME road that already covered half of it.
+  await bootScript({}, async (ctx) => {
+    await load(ctx);
+    const pink = features(ctx).filter(f => f.properties.state === 'missing');
+    assert.strictEqual(pink.length, 1);
+    const coords = pink[0].geometry.coordinates;
+    const [lon, lat] = coords[0];
+    assert.ok(Math.abs(lon - 14.551) < 1e-9, `should start on the north leg, got ${coords[0]}`);
+    assert.ok(lat > 46.05 && lat - 46.05 < 15 / 110540, `should start within 15 m of the corner, got ${coords[0]}`);
+    assert.deepStrictEqual(coords[coords.length - 1], [14.551, 46.051]);
+
+    click(ctx, pink[0].id);
+    assert.deepStrictEqual(argsOf(ctx.calls, 'DataModel.Segments.addSegment')[0].geometry.coordinates, coords);
+  }, { wmeSegments: [{ id: 1, geometry: { type: 'LineString', coordinates: [[14.55, 46.05], [14.551, 46.05]] } }] });
+});
+
 test('a second click on the same road creates nothing', async () => {
   await bootScript({}, async (ctx) => {
     await load(ctx);

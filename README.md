@@ -8,12 +8,12 @@ After installing, you get an **SL-ROAD** tab in the WME sidebar.
 
 1. Zoom in to level 16 or more
 2. Click **Load roads in view**
-3. Pink lines are cadastre roads with no WME road along them
+3. Pink lines are the parts of cadastre roads with no WME road along them
 4. **Click a pink line** to create a segment with its geometry
 
 The new segment is selected, two-way, with no street and no city. Forest roads are also marked unpaved. It is not connected to anything: split, join and set junctions yourself, then save.
 
-Each click creates exactly one segment from exactly the line you clicked. There is no bulk import.
+Each click creates exactly one segment from exactly the pink line you clicked. There is no bulk import.
 
 Lines turn grey and dashed once added. WME's undo removes the segment as usual.
 
@@ -37,7 +37,9 @@ Cycle paths, hiking trails and footpaths are never shown.
 
 ## What counts as missing
 
-A cadastre line is hidden when at least 80% of it lies within 15 m of a road WME has loaded. A road that only crosses it doesn't hide it. This only sees what WME has loaded, which is why loading needs zoom 16. When WME loads more map data, the check runs again.
+Only the parts of a cadastre road with no WME road within 15 m are drawn. Where WME already has part of the road, the pink line starts where the cadastre leaves it, so its loose end sits next to the road you connect it to. Leftover bits shorter than 30 m are dropped, since those are usually the same road drawn slightly differently on a bend. A road that crosses a cadastre line splits it in two at the crossing.
+
+This only sees what WME has loaded, which is why loading needs zoom 16. When WME loads more map data, the check runs again.
 
 ## Options
 

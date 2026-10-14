@@ -43,7 +43,7 @@
   const SIMPLIFY_TOLERANCE_M = 2;
   const COVERAGE_STEP_M = 5;
   const COVERAGE_MAX_DISTANCE_M = 15;
-  const COVERAGE_HIDE_FRACTION = 0.8;
+  const MIN_PIECE_LENGTH_M = 30;
 
   const LS = {
     getLayerVisible() { return localStorage.getItem('qrsl-layer-visible') !== '0'; }, // default on
@@ -253,26 +253,6 @@
     return len;
   }
 
-  // Points every stepM metres along pts (already in metres), both ends included.
-  function sampleAlong(pts, stepM) {
-    const out = [pts[0]];
-    let carry = 0; // distance walked since the last sample
-    for (let i = 1; i < pts.length; i++) {
-      const [ax, ay] = pts[i - 1];
-      const [bx, by] = pts[i];
-      const len = Math.hypot(bx - ax, by - ay);
-      let d = stepM - carry;
-      while (d <= len) {
-        const t = d / len;
-        out.push([ax + t * (bx - ax), ay + t * (by - ay)]);
-        d += stepM;
-      }
-      carry = len - (d - stepM);
-    }
-    out.push(pts[pts.length - 1]);
-    return out;
-  }
-
   function bboxOf(coords) {
     let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
     for (const [lon, lat] of coords) {
@@ -284,22 +264,50 @@
     return { minLon, minLat, maxLon, maxLat };
   }
 
-  // WME segment geometries with their boxes, computed once per coverage refresh rather
-  // than once per cadastre line: the refresh runs on every pan.
+  // WME segment geometries with their boxes, computed once per refresh rather than
+  // once per cadastre line: the refresh runs on every pan.
   function prepareSegments(segmentLines) {
     return segmentLines
       .filter(seg => Array.isArray(seg) && seg.length >= 2)
       .map(coords => ({ coords, box: bboxOf(coords) }));
   }
 
-  // Share of the line, 0..1, that has a WME segment within maxDistM. Sampled rather
-  // than measured as overlap, so a WME road drawn a few metres off the cadastre (the
-  // usual case) still counts, and a road that merely crosses the line does not.
-  // segments come from prepareSegments.
-  function coverageFraction(coords, segments, stepM, maxDistM) {
-    if (coords.length < 2) return 0;
+  // The point dM metres along coords, cum being the cumulative vertex distances.
+  // Linear in lon/lat, which is the same as linear in the local projection.
+  function pointAlong(coords, cum, dM) {
+    let i = 1;
+    while (i < coords.length - 1 && cum[i] < dM) i++;
+    const len = cum[i] - cum[i - 1];
+    const t = len ? Math.min(1, Math.max(0, (dM - cum[i - 1]) / len)) : 0;
+    const [ax, ay] = coords[i - 1];
+    const [bx, by] = coords[i];
+    return [ax + t * (bx - ax), ay + t * (by - ay)];
+  }
 
-    // Segments wholly outside the line's box, grown by maxDistM, cannot cover any
+  // The stretch of coords between two distances along it, keeping the original
+  // vertices in between.
+  function subLine(coords, cum, fromM, toM) {
+    const out = [pointAlong(coords, cum, fromM)];
+    for (let i = 0; i < coords.length; i++) {
+      if (cum[i] > fromM && cum[i] < toM) out.push(coords[i]);
+    }
+    out.push(pointAlong(coords, cum, toM));
+    return out;
+  }
+
+  // The stretches of a cadastre line with no WME road within maxDistM, as [lon, lat]
+  // lines. Sampled every stepM metres rather than measured as overlap, so a WME road
+  // drawn a few metres off the cadastre (the usual case) still counts. segments come
+  // from prepareSegments.
+  //
+  // Each stretch reaches back to the last sample that still had a road nearby, so its
+  // loose end sits next to the road the editor connects it to. Stretches shorter than
+  // minLengthM are dropped: they are usually the same road drawn slightly differently
+  // on a bend. A line with nothing near it at all is kept whole, however short.
+  function missingStretches(coords, segments, stepM, maxDistM, minLengthM) {
+    if (coords.length < 2) return [];
+
+    // Segments wholly outside the line's box, grown by maxDistM, cannot reach any
     // sample. Checked in degrees so the thousands of far segments in a view are
     // never projected.
     const box = bboxOf(coords);
@@ -314,14 +322,35 @@
       const sp = seg.map(project);
       for (let i = 1; i < sp.length; i++) edges.push([sp[i - 1], sp[i]]);
     }
-    if (!edges.length) return 0;
+    if (!edges.length) return [coords.slice()];
 
-    const samples = sampleAlong(coords.map(project), stepM);
-    let near = 0;
-    for (const s of samples) {
-      if (edges.some(([a, b]) => pointToSegmentDistance(s, a, b) <= maxDistM)) near++;
+    const pts = coords.map(project);
+    const cum = [0];
+    for (let i = 1; i < pts.length; i++) {
+      cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
     }
-    return near / samples.length;
+    const total = cum[cum.length - 1];
+
+    const ds = [];
+    for (let d = 0; d < total; d += stepM) ds.push(d);
+    ds.push(total);
+    const near = ds.map(d => {
+      const p = project(pointAlong(coords, cum, d));
+      return edges.some(([a, b]) => pointToSegmentDistance(p, a, b) <= maxDistM);
+    });
+    if (!near.some(Boolean)) return [coords.slice()];
+
+    const stretches = [];
+    for (let k = 0; k < ds.length; k++) {
+      if (near[k]) continue;
+      let j = k;
+      while (j + 1 < ds.length && !near[j + 1]) j++;
+      const fromM = k > 0 ? ds[k - 1] : 0;
+      const toM = j + 1 < ds.length ? ds[j + 1] : total;
+      if (toM - fromM >= minLengthM) stretches.push(subLine(coords, cum, fromM, toM));
+      k = j;
+    }
+    return stretches;
   }
 
   function buildItemsUrl(bbox, startIndex) {
@@ -493,8 +522,9 @@
 
   function init() {
     const lines = new Map();     // id -> RoadLine, for the current load
-    const covered = new Set();   // ids hidden because WME already has a road there
-    const imported = new Set();  // ids turned into segments since the last load
+    const pieces = new Map();    // id -> the part of a line WME has no road along
+    const imported = new Map();  // id -> { lineId, coords } of segments added since the last load
+    let importedCount = 0;
     let partial = false;         // the last load hit the page cap or lost pages
     let isLoading = false;
     let currentLoadId = 0;
@@ -539,31 +569,33 @@
       layerShown = visible;
     }
 
-    // Imported lines are left out: they stay drawn as a record of what was added.
-    function refreshCoverage() {
+    // Cuts every line down to the stretches WME has no road along. What this session
+    // added counts as a road too, so a piece can't reappear beside its own segment
+    // before WME lists that segment.
+    function refreshPieces() {
       const segments = prepareSegments(wmeSDK.DataModel.Segments.getAll()
-        .map(s => s.geometry && s.geometry.coordinates));
-      covered.clear();
+        .map(s => s.geometry && s.geometry.coordinates)
+        .concat([...imported.values()].map(a => a.coords)));
+      pieces.clear();
       for (const line of lines.values()) {
-        if (imported.has(line.id)) continue;
-        const f = coverageFraction(line.coords, segments, COVERAGE_STEP_M, COVERAGE_MAX_DISTANCE_M);
-        if (f >= COVERAGE_HIDE_FRACTION) covered.add(line.id);
+        missingStretches(line.coords, segments, COVERAGE_STEP_M, COVERAGE_MAX_DISTANCE_M, MIN_PIECE_LENGTH_M)
+          .forEach((coords, k) => {
+            const id = `${line.id}/${k}`;
+            pieces.set(id, { id, lineId: line.id, category: line.category, coords, lengthM: lineLengthM(coords) });
+          });
       }
     }
 
     // Ids are recorded before the add: if it throws part-way, removing an id that never
     // landed is harmless, while an orphan feature would stay clickable.
     function render() {
-      const features = [];
-      for (const line of lines.values()) {
-        if (covered.has(line.id)) continue;
-        features.push({
-          type: 'Feature',
-          id: line.id,
-          geometry: { type: 'LineString', coordinates: line.coords },
-          properties: { state: imported.has(line.id) ? 'imported' : 'missing' }
-        });
-      }
+      const feature = (id, coords, state) => ({
+        type: 'Feature', id, geometry: { type: 'LineString', coordinates: coords }, properties: { state }
+      });
+      const features = [
+        ...[...pieces.values()].map(p => feature(p.id, p.coords, 'missing')),
+        ...[...imported].map(([id, a]) => feature(id, a.coords, 'imported'))
+      ];
       try {
         if (layerIds.length) {
           wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_LAYER_NAME, featureIds: layerIds });
@@ -579,7 +611,7 @@
 
     function resetState() {
       lines.clear();
-      covered.clear();
+      pieces.clear();
       imported.clear();
       partial = false;
     }
@@ -638,8 +670,9 @@
           statusDiv.textContent = 'No roads in view.';
           return;
         }
-        const missing = lines.size - covered.size - imported.size;
-        let text = `${missing} missing, ${covered.size} already mapped`;
+        const open = new Set([...pieces.values(), ...imported.values()].map(p => p.lineId));
+        const mapped = [...lines.keys()].filter(id => !open.has(id)).length;
+        let text = `${pieces.size} missing, ${mapped} already mapped`;
         if (imported.size) text += `, ${imported.size} added`;
         if (partial) text += '. Loaded partially, zoom in and load again.';
         statusDiv.textContent = text;
@@ -683,7 +716,7 @@
 
           for (const line of buildRoadLines(result.features)) lines.set(line.id, line);
           partial = !result.complete;
-          refreshCoverage();
+          refreshPieces();
           render();
           updateStatus();
 
@@ -725,7 +758,7 @@
         eventName: 'wme-map-data-loaded',
         eventHandler: () => {
           if (!lines.size) return;
-          refreshCoverage();
+          refreshPieces();
           render();
           updateStatus();
         }
@@ -735,8 +768,8 @@
         eventName: 'wme-layer-feature-mouse-enter',
         eventHandler: ({ featureId, layerName } = {}) => {
           if (layerName !== SDK_LAYER_NAME) return;
-          const line = lines.get(String(featureId));
-          hoverDiv.textContent = line ? describeLine(line, overrideRoadType) : '';
+          const piece = pieces.get(String(featureId));
+          hoverDiv.textContent = piece ? describeLine(piece, overrideRoadType) : '';
         }
       });
       wmeSDK.Events.on({
@@ -758,21 +791,22 @@
         wmeSDK.DataModel.Segments.updateAddress({ segmentId, addressData: { primaryStreetId: street.id } });
       }
 
-      // One click, one segment. Junctions and connections are the editor's job.
-      function onLineClicked({ featureId, layerName } = {}) {
+      // One click, one segment from exactly the clicked piece. Junctions and
+      // connections are the editor's job.
+      function onPieceClicked({ featureId, layerName } = {}) {
         if (layerName !== SDK_LAYER_NAME) return;
-        const line = lines.get(String(featureId));
-        if (!line || imported.has(line.id) || covered.has(line.id)) return;
+        const piece = pieces.get(String(featureId));
+        if (!piece) return;
         if (!wmeSDK.Editing.isEditingAllowed()) {
           toast('Editing is not allowed here', 'warning');
           return;
         }
 
-        const { roadType, unpaved } = planSegment(line, overrideRoadType);
+        const { roadType, unpaved } = planSegment(piece, overrideRoadType);
         let segmentId;
         try {
           segmentId = wmeSDK.DataModel.Segments.addSegment({
-            geometry: { type: 'LineString', coordinates: line.coords },
+            geometry: { type: 'LineString', coordinates: piece.coords },
             roadType
           });
         } catch (e) {
@@ -781,7 +815,7 @@
           return;
         }
         // From here on the segment exists, so a second click must not make another.
-        imported.add(line.id);
+        imported.set(`added-${++importedCount}`, { lineId: piece.lineId, coords: piece.coords });
 
         const failed = [];
         try {
@@ -806,9 +840,10 @@
           failed.push('selection');
         }
 
+        refreshPieces();
         render();
         updateStatus();
-        const what = `${roadTypeName(roadType)}, ${Math.round(line.lengthM)} m`;
+        const what = `${roadTypeName(roadType)}, ${Math.round(piece.lengthM)} m`;
         if (failed.length) {
           toast(`${what} created, but setting ${failed.join(', ')} failed. Fix it by hand.`, 'warning');
         } else {
@@ -816,7 +851,7 @@
         }
       }
 
-      wmeSDK.Events.on({ eventName: 'wme-layer-feature-clicked', eventHandler: onLineClicked });
+      wmeSDK.Events.on({ eventName: 'wme-layer-feature-clicked', eventHandler: onPieceClicked });
 
       ['qrsl-load', 'qrsl-clear'].forEach(id => {
         try { wmeSDK.Shortcuts.deleteShortcut({ shortcutId: id }); } catch (_) {}
@@ -905,7 +940,7 @@
       simplifyLine,
       lineLengthM,
       prepareSegments,
-      coverageFraction,
+      missingStretches,
       buildItemsUrl,
       buildRoadLines,
       classifyFetchFailure,
