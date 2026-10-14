@@ -22,6 +22,10 @@
 (function () {
   'use strict';
 
+  let wmeSDK;
+  const SCRIPT_ID = 'quick-road-sl-importer';
+  const SDK_LAYER_NAME = 'qrsl-roads';
+
   const CADASTRE_API = 'https://ipi.eprostor.gov.si/wfs-si-gurs-kgi/ogc/features/collections/SI.GURS.KGI:LINIJE_CESTE_G/items';
   const CADASTRE_LIMIT = 1000;
   const CADASTRE_MAX_PAGES = 30;
@@ -40,6 +44,18 @@
   const COVERAGE_STEP_M = 5;
   const COVERAGE_MAX_DISTANCE_M = 15;
   const COVERAGE_HIDE_FRACTION = 0.8;
+
+  const LS = {
+    getLayerVisible() { return localStorage.getItem('qrsl-layer-visible') !== '0'; }, // default on
+    setLayerVisible(v){ localStorage.setItem('qrsl-layer-visible', v ? '1' : '0'); }
+  };
+
+  const INSTRUCTIONS_HTML = `<b>Instructions</b><br/>
+    1) Zoom in to level ${MIN_LOAD_ZOOM}+ • 2) Click "Load roads in view" • 3) <b>Click a pink line to add it as a segment</b><br/>
+    Connect it to the network yourself. Grey dashed = added since the last load.`;
+
+  const KBD_STYLE = 'margin-left:6px;font-size:10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;'
+    + 'background:rgba(0,0,0,0.08);border-radius:3px;padding:2px 5px;color:#555;';
 
   const TOAST_COLORS = {
     info:    { bg: '#e7f1ff', border: '#5b9bd5', text: '#12385e' },
@@ -79,6 +95,14 @@
       console.debug('[SL-ROAD] toast render failed:', e);
     }
   };
+
+  // True in Tampermonkey, false when the test suite require()s this file. Everything
+  // gated on it is browser-only setup.
+  const IN_USERSCRIPT_ENV = typeof unsafeWindow !== 'undefined' || typeof window !== 'undefined';
+
+  // wz-checkbox keeps its state in an attribute, not a .checked property.
+  const isChecked  = (el) => el?.hasAttribute('checked');
+  const setChecked = (el, v) => v ? el.setAttribute('checked', '') : el.removeAttribute('checked');
 
   // Waze road type ids, from the SDK's ROAD_TYPE constant. Literals, because the
   // constant is a module export in the SDK typings, not something on the instance.
@@ -458,6 +482,327 @@
 
       requestPage(1);
     });
+  }
+
+  function init() {
+    const lines = new Map();     // id -> RoadLine, for the current load
+    const covered = new Set();   // ids hidden because WME already has a road there
+    const imported = new Set();  // ids turned into segments since the last load
+    let partial = false;         // the last load hit the page cap or lost pages
+    let isLoading = false;
+    let currentLoadId = 0;
+    let overrideRoadType = null; // null = Auto from category
+    let layerWanted = LS.getLayerVisible();
+    let layerShown = false;
+    let layerIds = [];
+
+    try {
+      I18n.translations[I18n.currentLocale()].layers.name[SCRIPT_ID] = 'Quick Road Importer';
+    } catch (_) {}
+
+    wmeSDK.Map.addLayer({
+      layerName: SDK_LAYER_NAME,
+      styleRules: [
+        {
+          predicate: (p) => p.state === 'missing',
+          style: {
+            strokeColor: '#ff00ff', strokeWidth: 5, strokeOpacity: 0.85,
+            hoverStrokeColor: '#ffff00', hoverStrokeWidth: 7, cursor: 'pointer'
+          }
+        },
+        {
+          predicate: (p) => p.state === 'imported',
+          style: { strokeColor: '#888888', strokeWidth: 4, strokeOpacity: 0.5, strokeDashstyle: 'dash' }
+        }
+      ]
+    });
+    wmeSDK.Map.setLayerVisibility({ layerName: SDK_LAYER_NAME, visibility: false });
+    wmeSDK.Events.trackLayerEvents({ layerName: SDK_LAYER_NAME });
+
+    function updateLayerVisibility() {
+      const visible = layerWanted && wmeSDK.Map.getZoomLevel() >= MIN_LOAD_ZOOM;
+      if (visible === layerShown) return;
+      // Recorded only after the SDK accepted it, so a failed call is retried next time.
+      try {
+        wmeSDK.Map.setLayerVisibility({ layerName: SDK_LAYER_NAME, visibility: visible });
+      } catch (e) {
+        console.warn('[SL-ROAD] could not change layer visibility:', e);
+        return;
+      }
+      layerShown = visible;
+    }
+
+    // Imported lines are left out: they stay drawn as a record of what was added.
+    function refreshCoverage() {
+      const segmentLines = wmeSDK.DataModel.Segments.getAll()
+        .map(s => s.geometry && s.geometry.coordinates);
+      covered.clear();
+      for (const line of lines.values()) {
+        if (imported.has(line.id)) continue;
+        const f = coverageFraction(line.coords, segmentLines, COVERAGE_STEP_M, COVERAGE_MAX_DISTANCE_M);
+        if (f >= COVERAGE_HIDE_FRACTION) covered.add(line.id);
+      }
+    }
+
+    // Ids are recorded before the add: if it throws part-way, removing an id that never
+    // landed is harmless, while an orphan feature would stay clickable.
+    function render() {
+      const features = [];
+      for (const line of lines.values()) {
+        if (covered.has(line.id)) continue;
+        features.push({
+          type: 'Feature',
+          id: line.id,
+          geometry: { type: 'LineString', coordinates: line.coords },
+          properties: { state: imported.has(line.id) ? 'imported' : 'missing' }
+        });
+      }
+      try {
+        if (layerIds.length) {
+          wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_LAYER_NAME, featureIds: layerIds });
+          layerIds = [];
+        }
+        if (!features.length) return;
+        layerIds = features.map(f => f.id);
+        wmeSDK.Map.addFeaturesToLayer({ layerName: SDK_LAYER_NAME, features });
+      } catch (e) {
+        console.warn('[SL-ROAD] rendering failed:', e);
+      }
+    }
+
+    function resetState() {
+      lines.clear();
+      covered.clear();
+      imported.clear();
+      partial = false;
+    }
+
+    wmeSDK.Events.on({ eventName: 'wme-map-zoom-changed', eventHandler: () => updateLayerVisibility() });
+    updateLayerVisibility();
+
+    wmeSDK.Sidebar.registerScriptTab().then(({ tabLabel, tabPane }) => {
+      tabLabel.innerText = 'SL-ROAD';
+      tabLabel.title = 'Quick Road Importer (Slovenia)';
+
+      const typeOptions = ['<option value="">Auto from category</option>']
+        .concat(ROAD_TYPES.map(t => `<option value="${t.id}">${t.name}</option>`))
+        .join('');
+
+      tabPane.innerHTML = `
+        <div id="qrsl-pane" style="padding:10px;">
+          <h2 style="margin-top:0;">Quick Road Importer 🇸🇮</h2>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 8px 0;">
+            <button id="qrsl-load" class="wz-button"><span id="qrsl-load-label">Load roads in view</span> <kbd style="${KBD_STYLE}">Alt+Shift+R</kbd></button>
+            <button id="qrsl-clear" class="wz-button wz-button--secondary">Clear <kbd style="${KBD_STYLE}">Alt+Shift+X</kbd></button>
+          </div>
+          <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+            <wz-checkbox id="qrsl-toggle">Show layer</wz-checkbox>
+            <label style="font-size:12px;">Road type <select id="qrsl-roadtype" style="margin-left:6px;">${typeOptions}</select></label>
+          </div>
+          <div id="qrsl-status" style="margin-top:10px;font-size:12px;color:#666;line-height:1.4;">${INSTRUCTIONS_HTML}</div>
+          <div id="qrsl-hover" style="margin-top:6px;font-size:12px;font-weight:bold;min-height:1.4em;"></div>
+        </div>
+      `;
+
+      const btnLoad      = tabPane.querySelector('#qrsl-load');
+      const btnLoadLabel = tabPane.querySelector('#qrsl-load-label');
+      const btnClear     = tabPane.querySelector('#qrsl-clear');
+      const chkVis       = tabPane.querySelector('#qrsl-toggle');
+      const selRoadType  = tabPane.querySelector('#qrsl-roadtype');
+      const statusDiv    = tabPane.querySelector('#qrsl-status');
+      const hoverDiv     = tabPane.querySelector('#qrsl-hover');
+
+      setChecked(chkVis, layerWanted);
+
+      chkVis.addEventListener('click', () => {
+        const on = isChecked(chkVis);
+        setChecked(chkVis, !on);
+        layerWanted = !on;
+        LS.setLayerVisible(!on);
+        updateLayerVisibility();
+      });
+
+      selRoadType.addEventListener('change', () => {
+        overrideRoadType = selRoadType.value === '' ? null : Number(selRoadType.value);
+      });
+
+      function updateStatus() {
+        if (!lines.size) {
+          statusDiv.textContent = 'No roads in view.';
+          return;
+        }
+        const missing = lines.size - covered.size - imported.size;
+        let text = `${missing} missing, ${covered.size} already mapped`;
+        if (imported.size) text += `, ${imported.size} added`;
+        if (partial) text += '. Loaded partially, zoom in and load again.';
+        statusDiv.textContent = text;
+      }
+
+      async function loadRoads() {
+        if (isLoading) return;
+        if (wmeSDK.Map.getZoomLevel() < MIN_LOAD_ZOOM) {
+          toast(`Zoom in to level ${MIN_LOAD_ZOOM}+ to load roads`, 'warning');
+          return;
+        }
+        isLoading = true;
+        const myLoadId = ++currentLoadId;
+
+        // try/finally, or one throw leaves isLoading stuck and every later Load ignored.
+        try {
+          btnLoad.disabled = true;
+          btnLoadLabel.textContent = 'Loading…';
+          resetState();
+          render();
+          hoverDiv.textContent = '';
+          statusDiv.textContent = 'Loading roads…';
+
+          const ext = wmeSDK.Map.getMapExtent();
+          const [minLon, minLat, maxLon, maxLat] = Array.isArray(ext)
+            ? ext
+            : [ext.lonMin, ext.latMin, ext.lonMax, ext.latMax];
+
+          let result;
+          try {
+            result = await fetchCadastre({ minLon, minLat, maxLon, maxLat }, () => myLoadId !== currentLoadId);
+          } catch (err) {
+            if (myLoadId !== currentLoadId) return;
+            console.warn('[SL-ROAD] fetch failed:', err);
+            const msg = err.userMessage || 'Error fetching roads.';
+            toast(msg, 'error');
+            statusDiv.textContent = msg;
+            return;
+          }
+          if (myLoadId !== currentLoadId) return; // Clear or a newer Load since
+
+          for (const line of buildRoadLines(result.features)) lines.set(line.id, line);
+          partial = !result.complete;
+          refreshCoverage();
+          render();
+          updateStatus();
+
+          // Load is an explicit request to see the result.
+          if (!layerWanted) {
+            layerWanted = true;
+            setChecked(chkVis, true);
+            LS.setLayerVisible(true);
+          }
+          updateLayerVisibility();
+        } finally {
+          btnLoad.disabled = false;
+          btnLoadLabel.textContent = 'Load roads in view';
+          isLoading = false;
+        }
+      }
+
+      function clearRoads() {
+        currentLoadId++; // a load still in flight now drops its result
+        resetState();
+        render();
+        hoverDiv.textContent = '';
+        statusDiv.innerHTML = INSTRUCTIONS_HTML;
+      }
+
+      // Wrapped, so the click event never lands in a parameter.
+      btnLoad.addEventListener('click', () => loadRoads());
+      btnClear.addEventListener('click', () => clearRoads());
+
+      wmeSDK.Events.on({
+        eventName: 'wme-map-data-loaded',
+        eventHandler: () => {
+          if (!lines.size) return;
+          refreshCoverage();
+          render();
+          updateStatus();
+        }
+      });
+
+      wmeSDK.Events.on({
+        eventName: 'wme-layer-feature-mouse-enter',
+        eventHandler: ({ featureId, layerName } = {}) => {
+          if (layerName !== SDK_LAYER_NAME) return;
+          const line = lines.get(String(featureId));
+          hoverDiv.textContent = line ? describeLine(line, overrideRoadType) : '';
+        }
+      });
+      wmeSDK.Events.on({
+        eventName: 'wme-layer-feature-mouse-leave',
+        eventHandler: ({ layerName } = {}) => {
+          if (layerName === SDK_LAYER_NAME) hoverDiv.textContent = '';
+        }
+      });
+
+      ['qrsl-load', 'qrsl-clear'].forEach(id => {
+        try { wmeSDK.Shortcuts.deleteShortcut({ shortcutId: id }); } catch (_) {}
+      });
+      [
+        { shortcutId: 'qrsl-load',  shortcutKeys: 'AS+r', description: 'SL-ROAD: Load roads in view', callback: () => loadRoads() },
+        { shortcutId: 'qrsl-clear', shortcutKeys: 'AS+x', description: 'SL-ROAD: Clear',              callback: () => clearRoads() }
+      ].forEach(spec => {
+        try { wmeSDK.Shortcuts.createShortcut(spec); }
+        catch (e) { console.warn('[SL-ROAD] failed to register shortcut', spec.shortcutId, e); }
+      });
+    });
+  }
+
+  // The single entry point, and the one thing the test suite skips.
+  if (IN_USERSCRIPT_ENV) {
+  (unsafeWindow || window).SDK_INITIALIZED.then(() => {
+    wmeSDK = getWmeSdk({ scriptId: SCRIPT_ID, scriptName: 'Quick Road Importer (SI)' });
+    wmeSDK.Events.once({ eventName: 'wme-ready' }).then(() => {
+      // Checked against the SDK docs at v2.374 on 2026-10-14. getWmeSdk is called
+      // without a `version`, so WME always hands this script the latest SDK, and these
+      // lists catch a renamed method before it fails silently. Keep them in step with:
+      //   grep -oE 'wmeSDK\.[A-Za-z.]+\(' wme-sl-road-import.user.js | sort -u
+      // Anything in `required` aborts startup.
+      const required = [
+        'DataModel.Segments.getAll',
+        'DataModel.Segments.addSegment',
+        'DataModel.Segments.updateSegment',
+        'DataModel.Segments.updateAddress',
+        'DataModel.Countries.getTopCountry',
+        'DataModel.Cities.getCity',
+        'DataModel.Cities.addCity',
+        'DataModel.Streets.getStreet',
+        'DataModel.Streets.addStreet',
+        'Editing.setSelection',
+        'Editing.isEditingAllowed',
+        'Events.on',
+        'Events.once',
+        'Events.trackLayerEvents',
+        'Sidebar.registerScriptTab',
+        'Map.addLayer',
+        'Map.addFeaturesToLayer',
+        'Map.removeFeaturesFromLayer',
+        'Map.setLayerVisibility',
+        'Map.getZoomLevel',
+        'Map.getMapExtent'
+      ];
+      const optional = [
+        'Shortcuts.createShortcut',
+        'Shortcuts.deleteShortcut'
+      ];
+
+      const isMissing = (path) => {
+        let cur = wmeSDK;
+        for (const p of path.split('.')) { cur = cur?.[p]; if (cur == null) return true; }
+        return false;
+      };
+
+      const missing = required.filter(isMissing);
+      if (missing.length) {
+        console.error('[SL-ROAD] WME SDK missing required APIs:', missing);
+        toast(`SL-ROAD: WME SDK is missing ${missing.length} required APIs. See console.`, 'error');
+        return;
+      }
+
+      const missingOptional = optional.filter(isMissing);
+      if (missingOptional.length) {
+        console.warn('[SL-ROAD] WME SDK missing optional APIs (features degraded):', missingOptional);
+      }
+
+      init();
+    });
+  });
   }
 
   // Test-only surface. `module` does not exist in Tampermonkey, so this is a no-op

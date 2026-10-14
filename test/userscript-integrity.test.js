@@ -32,6 +32,21 @@ test('the version is a plain semver string Tampermonkey can compare', () => {
   assert.match(m[1].trim(), /^\d+\.\d+\.\d+$/);
 });
 
+test('the WME entry point is still wired up', () => {
+  // If this disappears the script silently does nothing in the browser.
+  assert.match(source, /SDK_INITIALIZED/);
+  assert.match(source, /getWmeSdk\(/);
+});
+
+test('the entry point is gated on a browser check, not on absence of Node', () => {
+  assert.match(source, /IN_USERSCRIPT_ENV/);
+  assert.match(source, /typeof unsafeWindow !== 'undefined'/);
+  assert.ok(
+    !/if \(typeof module === 'undefined'\)/.test(source),
+    'must not gate startup on the absence of a module system'
+  );
+});
+
 test('requiring the script produces no side effects beyond exports', () => {
   delete require.cache[require.resolve(SCRIPT_PATH)];
   const exported = require(SCRIPT_PATH);
