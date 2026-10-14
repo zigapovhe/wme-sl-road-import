@@ -66,7 +66,7 @@ test('only pure functions are exported', () => {
   const exported = require(SCRIPT_PATH);
   const allowed = new Set([
     'ROAD_TYPES', 'categoryInfo', 'roadTypeName', 'planSegment', 'describeLine',
-    'splitLines', 'simplifyLine', 'lineLengthM', 'prepareSegments', 'missingStretches',
+    'splitLines', 'simplifyLine', 'lineLengthM', 'prepareSegments', 'missingStretches', 'snapToCadastre',
     'buildItemsUrl', 'buildRoadLines',
     'classifyFetchFailure', 'decideFetchRetry', 'fetchRetryDelay'
   ]);

@@ -185,13 +185,35 @@
     return ([lon, lat]) => [(lon - lon0) * kx, (lat - lat0) * M_PER_DEG_LAT];
   }
 
-  // Distance from p to the segment a-b, all [x, y] in metres.
-  function pointToSegmentDistance([px, py], [ax, ay], [bx, by]) {
+  // Where on the edge a-b the point p comes closest: the distance, and how far along
+  // the edge (0..1). All [x, y] in metres.
+  function closestOnEdge([px, py], [ax, ay], [bx, by]) {
     const dx = bx - ax;
     const dy = by - ay;
     const len2 = dx * dx + dy * dy;
     const t = len2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2)) : 0;
-    return Math.hypot(ax + t * dx - px, ay + t * dy - py);
+    return { dist: Math.hypot(ax + t * dx - px, ay + t * dy - py), t };
+  }
+
+  function pointToSegmentDistance(p, a, b) {
+    return closestOnEdge(p, a, b).dist;
+  }
+
+  // Cumulative distance to every vertex of pts (in metres).
+  function cumulative(pts) {
+    const cum = [0];
+    for (let i = 1; i < pts.length; i++) {
+      cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+    }
+    return cum;
+  }
+
+  // Every stepM metres along a line of length totalM, both ends included.
+  function sampleDistances(totalM, stepM) {
+    const ds = [];
+    for (let d = 0; d < totalM; d += stepM) ds.push(d);
+    ds.push(totalM);
+    return ds;
   }
 
   // The cadastre geometry as plain [lon, lat] lines. Heights go (WME geometry is 2D),
@@ -350,15 +372,8 @@
     if (!edges.length) return [coords.slice()];
 
     const pts = coords.map(project);
-    const cum = [0];
-    for (let i = 1; i < pts.length; i++) {
-      cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
-    }
-    const total = cum[cum.length - 1];
-
-    const ds = [];
-    for (let d = 0; d < total; d += stepM) ds.push(d);
-    ds.push(total);
+    const cum = cumulative(pts);
+    const ds = sampleDistances(cum[cum.length - 1], stepM);
     const near = ds.map(d => {
       const i = edgeAt(cum, d);
       const dir = [pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]];
@@ -378,6 +393,116 @@
       k = j;
     }
     return stretches;
+  }
+
+  // The vertices of a projected cadastre line between two positions along it, in the
+  // order of travel from one to the other. The vertex at fromM itself only when asked.
+  function verticesBetween(line, fromM, toM, includeFrom) {
+    const out = [];
+    const { coords, cum } = line;
+    if (fromM <= toM) {
+      for (let j = 0; j < coords.length; j++) {
+        if ((includeFrom ? cum[j] >= fromM : cum[j] > fromM) && cum[j] < toM) out.push(coords[j]);
+      }
+    } else {
+      for (let j = coords.length - 1; j >= 0; j--) {
+        if ((includeFrom ? cum[j] <= fromM : cum[j] < fromM) && cum[j] > toM) out.push(coords[j]);
+      }
+    }
+    return out;
+  }
+
+  // New geometry for a WME segment, moved onto the cadastre line(s) running alongside
+  // it. The two end points are the segment's own, so its nodes and connections stay
+  // where they are.
+  //
+  // Walks the segment every stepM metres and matches each sample to the nearest
+  // cadastre edge running alongside within maxDistM. It keeps to the same cadastre
+  // line while that still qualifies, so a road between two carriageways doesn't
+  // zigzag, and keeps the cadastre's own vertices between matches, so bends keep their
+  // shape. Returns null when a sample further than endSkipM from both ends has no
+  // match: half a snap is worse than none.
+  function snapToCadastre(segCoords, cadastreLines, stepM, maxDistM, endSkipM, toleranceM) {
+    if (segCoords.length < 2) return null;
+    const project = makeLocalProjection(segCoords[0]);
+
+    const box = bboxOf(segCoords);
+    const padLon = maxDistM / metresPerDegLon(segCoords[0][1]);
+    const padLat = maxDistM / M_PER_DEG_LAT;
+    const candidates = [];
+    for (const coords of cadastreLines) {
+      if (!Array.isArray(coords) || coords.length < 2) continue;
+      const b = bboxOf(coords);
+      if (b.maxLon < box.minLon - padLon || b.minLon > box.maxLon + padLon
+        || b.maxLat < box.minLat - padLat || b.minLat > box.maxLat + padLat) continue;
+      const pts = coords.map(project);
+      candidates.push({ coords, pts, cum: cumulative(pts) });
+    }
+
+    const segPts = segCoords.map(project);
+    const segCum = cumulative(segPts);
+    const total = segCum[segCum.length - 1];
+
+    const matches = [];
+    let current = null;
+    for (const d of sampleDistances(total, stepM)) {
+      const i = edgeAt(segCum, d);
+      const dir = [segPts[i][0] - segPts[i - 1][0], segPts[i][1] - segPts[i - 1][1]];
+      const p = project(pointAlong(segCoords, segCum, d));
+      let best = null;
+      let bestOnCurrent = null;
+      for (const line of candidates) {
+        for (let j = 1; j < line.pts.length; j++) {
+          const a = line.pts[j - 1];
+          const b = line.pts[j];
+          if (!isAlongside(dir, a, b)) continue;
+          const { dist, t } = closestOnEdge(p, a, b);
+          if (dist > maxDistM) continue;
+          const m = { line, pos: line.cum[j - 1] + t * (line.cum[j] - line.cum[j - 1]), dist };
+          if (!best || dist < best.dist) best = m;
+          if (line === current && (!bestOnCurrent || dist < bestOnCurrent.dist)) bestOnCurrent = m;
+        }
+      }
+      const m = bestOnCurrent || best;
+      if (!m) {
+        if (d > endSkipM && d < total - endSkipM) return null;
+        continue;
+      }
+      current = m.line;
+      matches.push(m);
+    }
+    if (!matches.length) return null;
+
+    const out = [segCoords[0]];
+    let prev = null;
+    for (const m of matches) {
+      if (prev && prev.line === m.line) {
+        out.push(...verticesBetween(m.line, prev.pos, m.pos, false));
+      } else if (prev) {
+        // Onto another cadastre line, normally at a cadastre junction: finish the old
+        // line to its end there and start the new one from it, so the corner between
+        // them is kept.
+        const ends = (line) => [{ pos: 0, pt: line.pts[0] }, { pos: line.cum[line.cum.length - 1], pt: line.pts[line.pts.length - 1] }];
+        let joint = null;
+        for (const a of ends(prev.line)) {
+          for (const b of ends(m.line)) {
+            const dist = Math.hypot(a.pt[0] - b.pt[0], a.pt[1] - b.pt[1]);
+            if (dist <= maxDistM && (!joint || dist < joint.dist)) joint = { a, b, dist };
+          }
+        }
+        if (joint) {
+          out.push(...verticesBetween(prev.line, prev.pos, joint.a.pos, false));
+          out.push(pointAlong(prev.line.coords, prev.line.cum, joint.a.pos));
+          out.push(...verticesBetween(m.line, joint.b.pos, m.pos, true));
+        }
+      }
+      out.push(pointAlong(m.line.coords, m.line.cum, m.pos));
+      prev = m;
+    }
+    out.push(segCoords[segCoords.length - 1]);
+
+    const deduped = out.filter((p, k) => k === 0 || p[0] !== out[k - 1][0] || p[1] !== out[k - 1][1]);
+    return simplifyLine(deduped, toleranceM);
   }
 
   function buildItemsUrl(bbox, startIndex) {
@@ -993,6 +1118,7 @@
       lineLengthM,
       prepareSegments,
       missingStretches,
+      snapToCadastre,
       buildItemsUrl,
       buildRoadLines,
       classifyFetchFailure,
