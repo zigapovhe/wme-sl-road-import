@@ -37,7 +37,7 @@ Cycle paths, hiking trails and footpaths are never shown.
 
 ## What counts as missing
 
-Only the parts of a cadastre road with no WME road within 15 m are drawn. Where WME already has part of the road, the pink line starts where the cadastre leaves it, so its loose end sits next to the road you connect it to. Leftover bits shorter than 30 m are dropped, since those are usually the same road drawn slightly differently on a bend. A road that crosses a cadastre line splits it in two at the crossing.
+Only the parts of a cadastre road with no WME road running alongside them (within 15 m and roughly the same direction) are drawn. Where WME already has part of the road, the pink line starts where the cadastre turns away from it. A road that only meets or crosses a cadastre line doesn't count, so a short link between two roads shows whole and reaches both, and a line crossing a road is drawn across it for you to add the junction. Leftover bits shorter than 30 m are dropped, since those are usually the same road drawn slightly differently on a bend.
 
 This only sees what WME has loaded, which is why loading needs zoom 16. When WME loads more map data, the check runs again.
 

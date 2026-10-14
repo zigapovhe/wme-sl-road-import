@@ -272,11 +272,18 @@
       .map(coords => ({ coords, box: bboxOf(coords) }));
   }
 
-  // The point dM metres along coords, cum being the cumulative vertex distances.
-  // Linear in lon/lat, which is the same as linear in the local projection.
-  function pointAlong(coords, cum, dM) {
+  // Index i of the edge (i-1 -> i) holding the point dM metres along, cum being the
+  // cumulative vertex distances.
+  function edgeAt(cum, dM) {
     let i = 1;
-    while (i < coords.length - 1 && cum[i] < dM) i++;
+    while (i < cum.length - 1 && cum[i] < dM) i++;
+    return i;
+  }
+
+  // The point dM metres along coords. Linear in lon/lat, which is the same as linear
+  // in the local projection.
+  function pointAlong(coords, cum, dM) {
+    const i = edgeAt(cum, dM);
     const len = cum[i] - cum[i - 1];
     const t = len ? Math.min(1, Math.max(0, (dM - cum[i - 1]) / len)) : 0;
     const [ax, ay] = coords[i - 1];
@@ -285,25 +292,41 @@
   }
 
   // The stretch of coords between two distances along it, keeping the original
-  // vertices in between.
+  // vertices in between. A vertex within a metre of a cut is skipped, or the new road
+  // would start or end with a segment WME editors would have to clean up.
   function subLine(coords, cum, fromM, toM) {
     const out = [pointAlong(coords, cum, fromM)];
     for (let i = 0; i < coords.length; i++) {
-      if (cum[i] > fromM && cum[i] < toM) out.push(coords[i]);
+      if (cum[i] > fromM + 1 && cum[i] < toM - 1) out.push(coords[i]);
     }
     out.push(pointAlong(coords, cum, toM));
     return out;
   }
 
-  // The stretches of a cadastre line with no WME road within maxDistM, as [lon, lat]
-  // lines. Sampled every stepM metres rather than measured as overlap, so a WME road
-  // drawn a few metres off the cadastre (the usual case) still counts. segments come
-  // from prepareSegments.
+  // A WME edge only stands for a stretch of cadastre road if it runs alongside it.
+  // A road the line merely meets or crosses is close at that spot, but it is not this
+  // road, and counting it cut connectors short or hid them entirely.
+  const ALONGSIDE_MAX_ANGLE_DEG = 45;
+  const ALONGSIDE_MIN_COS2 = Math.cos(ALONGSIDE_MAX_ANGLE_DEG * Math.PI / 180) ** 2;
+
+  // Whether direction u and the edge a-b are within ALONGSIDE_MAX_ANGLE_DEG of each
+  // other, either way round.
+  function isAlongside(u, [ax, ay], [bx, by]) {
+    const vx = bx - ax;
+    const vy = by - ay;
+    const vv = vx * vx + vy * vy;
+    const dot = u[0] * vx + u[1] * vy;
+    return vv > 0 && dot * dot >= ALONGSIDE_MIN_COS2 * (u[0] * u[0] + u[1] * u[1]) * vv;
+  }
+
+  // The stretches of a cadastre line with no WME road running alongside it within
+  // maxDistM, as [lon, lat] lines. Sampled every stepM metres rather than measured as
+  // overlap, so a WME road drawn a few metres off the cadastre (the usual case) still
+  // counts. segments come from prepareSegments.
   //
-  // Each stretch reaches back to the last sample that still had a road nearby, so its
-  // loose end sits next to the road the editor connects it to. Stretches shorter than
-  // minLengthM are dropped: they are usually the same road drawn slightly differently
-  // on a bend. A line with nothing near it at all is kept whole, however short.
+  // Stretches shorter than minLengthM are dropped: they are usually the same road
+  // drawn slightly differently on a bend. A line with nothing alongside it at all is
+  // kept whole, however short.
   function missingStretches(coords, segments, stepM, maxDistM, minLengthM) {
     if (coords.length < 2) return [];
 
@@ -335,8 +358,10 @@
     for (let d = 0; d < total; d += stepM) ds.push(d);
     ds.push(total);
     const near = ds.map(d => {
+      const i = edgeAt(cum, d);
+      const dir = [pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]];
       const p = project(pointAlong(coords, cum, d));
-      return edges.some(([a, b]) => pointToSegmentDistance(p, a, b) <= maxDistM);
+      return edges.some(([a, b]) => pointToSegmentDistance(p, a, b) <= maxDistM && isAlongside(dir, a, b));
     });
     if (!near.some(Boolean)) return [coords.slice()];
 
@@ -345,8 +370,8 @@
       if (near[k]) continue;
       let j = k;
       while (j + 1 < ds.length && !near[j + 1]) j++;
-      const fromM = k > 0 ? ds[k - 1] : 0;
-      const toM = j + 1 < ds.length ? ds[j + 1] : total;
+      const fromM = ds[k];
+      const toM = ds[j];
       if (toM - fromM >= minLengthM) stretches.push(subLine(coords, cum, fromM, toM));
       k = j;
     }
