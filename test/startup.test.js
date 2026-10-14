@@ -111,6 +111,26 @@ test('clear during a load drops the late result', async () => {
   });
 });
 
+test('load right after clear starts a new load', async () => {
+  // Clear cannot cancel the request already in flight. It must not leave Load refusing
+  // to start until that request finally returns, up to 30 s later.
+  await bootScript({}, async (ctx) => {
+    shortcut(ctx.calls, 'qrsl-load')();
+    shortcut(ctx.calls, 'qrsl-clear')();
+    shortcut(ctx.calls, 'qrsl-load')();
+    assert.strictEqual(ctx.requests.length, 2, 'the second load goes out at once');
+
+    // The stale first load returns at 50 ms while the second is still in flight, so
+    // another press must still be refused.
+    await new Promise(r => setTimeout(r, 100));
+    shortcut(ctx.calls, 'qrsl-load')();
+    assert.strictEqual(ctx.requests.length, 2, 'the stale load must not release Load');
+
+    await new Promise(r => setTimeout(r, 250));
+    assert.strictEqual(features(ctx).length, 1, 'the second load is drawn');
+  }, { responseDelayMs: (n) => (n === 1 ? 50 : 200) });
+});
+
 test('below zoom 16 load does not fetch', async () => {
   await bootScript({}, async (ctx) => {
     shortcut(ctx.calls, 'qrsl-load')();

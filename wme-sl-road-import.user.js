@@ -695,14 +695,22 @@
           }
           updateLayerVisibility();
         } finally {
-          btnLoad.disabled = false;
-          btnLoadLabel.textContent = 'Load roads in view';
-          isLoading = false;
+          // After a Clear, Load was already released, and a newer load may own it now.
+          if (myLoadId === currentLoadId) {
+            btnLoad.disabled = false;
+            btnLoadLabel.textContent = 'Load roads in view';
+            isLoading = false;
+          }
         }
       }
 
+      // A request in flight can't be cancelled. Bumping the id makes its result drop,
+      // and Load is released now rather than when that request returns.
       function clearRoads() {
-        currentLoadId++; // a load still in flight now drops its result
+        currentLoadId++;
+        isLoading = false;
+        btnLoad.disabled = false;
+        btnLoadLabel.textContent = 'Load roads in view';
         resetState();
         render();
         hoverDiv.textContent = '';

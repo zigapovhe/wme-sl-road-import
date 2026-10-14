@@ -40,6 +40,7 @@ const DEFAULT_CADASTRE = { type: 'FeatureCollection', features: [FOREST, TRAIL],
 //   zoom (default 17), wmeSegments (what Segments.getAll returns),
 //   editingAllowed (default true), addSegmentThrows, updateAddressThrows,
 //   cadastre: the FeatureCollection every request returns, or 'reject' for an HTTP 400.
+//   responseDelayMs: how long each request takes, a number or (requestNumber) => ms.
 async function bootScript(storage = {}, whileStubbed = null, options = {}) {
   const calls = [];
   const layers = new Map();
@@ -123,6 +124,10 @@ async function bootScript(storage = {}, whileStubbed = null, options = {}) {
     requestAnimationFrame: (fn) => setTimeout(fn, 0),
     GM_xmlhttpRequest(req) {
       requests.push(req);
+      const n = requests.length;
+      const delay = typeof options.responseDelayMs === 'function'
+        ? options.responseDelayMs(n)
+        : (options.responseDelayMs || 0);
       setTimeout(() => {
         const body = options.cadastre ?? DEFAULT_CADASTRE;
         if (body === 'reject') {
@@ -130,7 +135,7 @@ async function bootScript(storage = {}, whileStubbed = null, options = {}) {
           return;
         }
         req.onload({ status: 200, responseText: JSON.stringify(body) });
-      }, 0);
+      }, delay);
     },
     localStorage: {
       getItem: (k) => (k in storage ? storage[k] : null),
