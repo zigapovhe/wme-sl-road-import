@@ -1380,9 +1380,8 @@
     wmeSDK.Events.once({ eventName: 'wme-ready' }).then(() => {
       // Checked against the SDK docs at v2.374 on 2026-10-14. getWmeSdk is called
       // without a `version`, so WME always hands this script the latest SDK, and these
-      // lists catch a renamed method before it fails silently. Keep them in step with:
-      //   grep -oE 'wmeSDK\.[A-Za-z.]+\(' wme-sl-road-import.user.js | sort -u
-      // Anything in `required` aborts startup.
+      // lists catch a renamed method before it fails silently. A test checks they name
+      // every SDK call in this file. Anything in `required` aborts startup.
       const required = [
         'DataModel.Segments.getAll',
         'DataModel.Segments.getById',

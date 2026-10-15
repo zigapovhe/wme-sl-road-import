@@ -34,6 +34,8 @@ const TRAIL = {
 };
 const DEFAULT_CADASTRE = { type: 'FeatureCollection', features: [FOREST, TRAIL], numberMatched: 2, numberReturned: 2 };
 
+const realSetTimeout = setTimeout;
+
 // storage: localStorage contents to boot with.
 // whileStubbed: run after boot and before the stubs come down. Anything that calls
 // back into the script goes here.
@@ -43,7 +45,12 @@ const DEFAULT_CADASTRE = { type: 'FeatureCollection', features: [FOREST, TRAIL],
 //   editingAllowed (default true), addSegmentThrows, updateAddressThrows,
 //   selection (what Editing.getSelection returns), segments (id -> segment for getById),
 //   cadastre: the FeatureCollection every request returns, or 'reject' for an HTTP 400.
+//   respond: (requestNumber) => what that request gets instead: a FeatureCollection,
+//     'reject', 'timeout' or 'error'. Returning undefined falls back to cadastre.
 //   responseDelayMs: how long each request takes, a number or (requestNumber) => ms.
+//
+// Waits of a second or more, which are the retry backoff and the toast fade, run 20
+// times faster, so retry tests take milliseconds.
 async function bootScript(storage = {}, whileStubbed = null, options = {}) {
   const calls = [];
   const layers = new Map();
@@ -139,6 +146,7 @@ async function bootScript(storage = {}, whileStubbed = null, options = {}) {
     getWmeSdk: () => deepStub([]),
     I18n: { translations: { en: { layers: { name: {} } } }, currentLocale: () => 'en' },
     requestAnimationFrame: (fn) => setTimeout(fn, 0),
+    setTimeout: (fn, ms) => realSetTimeout(fn, ms >= 1000 ? ms / 20 : ms),
     GM_xmlhttpRequest(req) {
       requests.push(req);
       const n = requests.length;
@@ -146,7 +154,9 @@ async function bootScript(storage = {}, whileStubbed = null, options = {}) {
         ? options.responseDelayMs(n)
         : (options.responseDelayMs || 0);
       setTimeout(() => {
-        const body = options.cadastre ?? DEFAULT_CADASTRE;
+        const body = options.respond?.(n) ?? options.cadastre ?? DEFAULT_CADASTRE;
+        if (body === 'timeout') { req.ontimeout(); return; }
+        if (body === 'error') { req.onerror(); return; }
         if (body === 'reject') {
           req.onload({ status: 400, responseText: '<html>Bad Request</html>' });
           return;

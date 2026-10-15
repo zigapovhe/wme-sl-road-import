@@ -74,3 +74,12 @@ test('only pure functions are exported', () => {
     assert.ok(allowed.has(key), `unexpected export "${key}", keep SDK/DOM code private`);
   }
 });
+
+test('the SDK check lists exactly the SDK calls the script makes', () => {
+  // A call missing from the lists fails silently once WME renames it, and a listed API
+  // nothing calls can block startup for no reason.
+  const called = new Set([...source.matchAll(/wmeSDK\.([A-Za-z.]+)\(/g)].map(m => m[1]));
+  const list = (name) => source.match(new RegExp(`const ${name} = \\[([^\\]]*)\\]`))[1];
+  const listed = new Set([...(list('required') + list('optional')).matchAll(/'([A-Za-z.]+)'/g)].map(m => m[1]));
+  assert.deepStrictEqual([...called].sort(), [...listed].sort());
+});
