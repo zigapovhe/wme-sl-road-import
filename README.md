@@ -1,5 +1,7 @@
 # WME Quick Road Importer – Slovenia 🇸🇮
 
+![SL-ROAD icon](./icon64.png)
+
 A **Tampermonkey userscript** for Waze Map Editor (WME) that shows roads from the Slovenian infrastructure cadastre (GJI) that are missing in WME, and adds one as a segment when you click it.
 It works for any road WME is missing, though most of them turn out to be forest roads hidden under the trees.
 

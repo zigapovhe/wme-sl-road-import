@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2f8f52"/>
+      <stop offset="1" stop-color="#1c5e36"/>
+    </linearGradient>
+    <clipPath id="tile"><rect x="2" y="2" width="60" height="60" rx="14"/></clipPath>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#bg)"/>
+  <g clip-path="url(#tile)" fill="none">
+    <path d="M15 6 L21 14.5 L18 14.5 L23 21.5 L19.5 21.5 L25 29.5 L5 29.5 L10.5 21.5 L7 21.5 L12 14.5 L9 14.5 Z" fill="#164a2b"/>
+    <rect x="13.4" y="29" width="3.2" height="4.5" fill="#164a2b"/>
+    <path d="M12 66 C12 46 30 46 32 33" stroke="#f4f1e8" stroke-width="11"/>
+    <path d="M32 33 C34 22 52 20 52 -2" stroke="#ff2fc0" stroke-width="11"/>
+    <path d="M12 66 C12 46 30 46 32 33 C34 22 52 20 52 -2" stroke="#1c5e36" stroke-width="1.8" stroke-dasharray="4 3.5"/>
+  </g>
+  <circle cx="47.5" cy="47.5" r="11.5" fill="#ff2fc0" stroke="#ffffff" stroke-width="2.5"/>
+  <path d="M47.5 41.5 V53.5 M41.5 47.5 H53.5" stroke="#ffffff" stroke-width="3.6" stroke-linecap="round"/>
+</svg>

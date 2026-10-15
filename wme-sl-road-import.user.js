@@ -7,6 +7,8 @@
 // @downloadURL  https://raw.githubusercontent.com/zigapovhe/wme-sl-road-import/main/wme-sl-road-import.user.js
 // @updateURL    https://raw.githubusercontent.com/zigapovhe/wme-sl-road-import/main/wme-sl-road-import.user.js
 // @supportURL   https://github.com/zigapovhe/wme-sl-road-import/issues
+// @icon         https://raw.githubusercontent.com/zigapovhe/wme-sl-road-import/main/icon48.png
+// @icon64       https://raw.githubusercontent.com/zigapovhe/wme-sl-road-import/main/icon64.png
 // @match        https://www.waze.com/editor*
 // @match        https://www.waze.com/*/editor*
 // @match        https://beta.waze.com/*
