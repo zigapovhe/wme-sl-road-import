@@ -745,86 +745,160 @@
     }
   }
 
-  function init() {
+  // Grey and cyan lines lie exactly on WME segments: the one just created, or a road
+  // WME already has. They let the mouse through, or they would catch the drags and
+  // clicks meant for those segments and their nodes.
+  const ROAD_LAYER_STYLES = [
+    {
+      predicate: (p) => p.state === 'missing',
+      style: {
+        strokeColor: '#ff00ff', strokeWidth: 5, strokeOpacity: 0.85,
+        hoverStrokeColor: '#ffff00', hoverStrokeWidth: 7, cursor: 'pointer'
+      }
+    },
+    {
+      predicate: (p) => p.state === 'reference',
+      style: { strokeColor: '#00e5ff', strokeWidth: 2, strokeOpacity: 0.8, pointerEvents: 'none' }
+    },
+    {
+      predicate: (p) => p.state === 'preview',
+      style: {
+        strokeColor: '#00ff66', strokeWidth: 4, strokeOpacity: 0.9, strokeDashstyle: 'dash',
+        pointerEvents: 'none'
+      }
+    },
+    {
+      predicate: (p) => p.state === 'imported',
+      style: {
+        strokeColor: '#888888', strokeWidth: 4, strokeOpacity: 0.5, strokeDashstyle: 'dash',
+        pointerEvents: 'none'
+      }
+    }
+  ];
+
+  // Zoomed out, a ring around a node is lost among the roads, so it becomes a solid
+  // dot. Both sit on a WME node and let the mouse through to it, like the grey lines.
+  const ENDS_LAYER_STYLES = [
+    {
+      predicate: (p) => p.state === 'ring',
+      style: {
+        pointRadius: 12, fill: false, strokeColor: '#ff8c00', strokeWidth: 3, strokeOpacity: 0.95,
+        pointerEvents: 'none'
+      }
+    },
+    {
+      predicate: (p) => p.state === 'dot',
+      style: {
+        pointRadius: 8, fillColor: '#ff8c00', fillOpacity: 0.9, strokeColor: '#ffffff', strokeWidth: 2,
+        pointerEvents: 'none'
+      }
+    }
+  ];
+
+  // Swaps a layer's features and returns the ids now on it. Ids are recorded before
+  // the add: if it throws part-way, removing an id that never landed is harmless,
+  // while an orphan feature would stay clickable.
+  function replaceFeatures(layerName, ids, features) {
+    try {
+      if (ids.length) {
+        wmeSDK.Map.removeFeaturesFromLayer({ layerName, featureIds: ids });
+        ids = [];
+      }
+      if (!features.length) return ids;
+      ids = features.map(f => f.id);
+      wmeSDK.Map.addFeaturesToLayer({ layerName, features });
+    } catch (e) {
+      console.warn('[SL-ROAD] rendering failed:', e);
+    }
+    return ids;
+  }
+
+  // [minLon, minLat, maxLon, maxLat] of the view.
+  function mapBounds() {
+    const ext = wmeSDK.Map.getMapExtent();
+    return Array.isArray(ext) ? ext : [ext.lonMin, ext.latMin, ext.lonMax, ext.latMax];
+  }
+
+  function selectedSegmentId() {
+    const sel = wmeSDK.Editing.getSelection();
+    return sel && sel.objectType === 'segment' && sel.ids.length === 1 ? sel.ids[0] : null;
+  }
+
+  // The empty street with no city, in the country WME is centred on.
+  function setEmptyAddress(segmentId) {
+    const country = wmeSDK.DataModel.Countries.getTopCountry();
+    if (!country) throw new Error('WME has no top country here');
+    const countryId = country.id;
+    const city = wmeSDK.DataModel.Cities.getCity({ cityName: '', countryId })
+      || wmeSDK.DataModel.Cities.addCity({ cityName: '', countryId });
+    const street = wmeSDK.DataModel.Streets.getStreet({ streetName: '', cityId: city.id })
+      || wmeSDK.DataModel.Streets.addStreet({ streetName: '', cityId: city.id });
+    wmeSDK.DataModel.Segments.updateAddress({ segmentId, addressData: { primaryStreetId: street.id } });
+  }
+
+  // Fills the sidebar tab and returns the elements the features below work with.
+  function buildPane(tabPane) {
+    const typeOptions = ['<option value="">Auto from category</option>']
+      .concat(ROAD_TYPES.map(t => `<option value="${t.id}">${t.name}</option>`))
+      .join('');
+
+    tabPane.innerHTML = `
+      <div id="qrsl-pane" style="padding:10px;">
+        <h2 style="margin-top:0;">Quick Road Importer 🇸🇮</h2>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 8px 0;">
+          <button id="qrsl-load" class="wz-button"><span id="qrsl-load-label">Load roads in view</span> <kbd style="${KBD_STYLE}">Alt+Shift+R</kbd></button>
+          <button id="qrsl-clear" class="wz-button wz-button--secondary">Clear <kbd style="${KBD_STYLE}">Alt+Shift+X</kbd></button>
+        </div>
+        <div style="margin:0 0 8px 0;">
+          <button id="qrsl-align" class="wz-button wz-button--secondary">Align road geometry <kbd style="${KBD_STYLE}">Alt+Shift+G</kbd></button>
+        </div>
+        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+          <wz-checkbox id="qrsl-toggle">Show layer</wz-checkbox>
+          <wz-checkbox id="qrsl-show-mapped">Show already mapped roads</wz-checkbox>
+          <wz-checkbox id="qrsl-show-ends">Show disconnected ends</wz-checkbox>
+          <label style="font-size:12px;">Road type <select id="qrsl-roadtype" style="margin-left:6px;">${typeOptions}</select></label>
+        </div>
+        <div id="qrsl-status" style="margin-top:10px;font-size:12px;color:#666;line-height:1.4;">${INSTRUCTIONS_HTML}</div>
+        <div id="qrsl-ends" style="margin-top:6px;font-size:12px;color:#b35f00;"></div>
+        <div id="qrsl-ends-list" style="max-height:160px;overflow-y:auto;font-size:12px;color:#b35f00;"></div>
+        <div id="qrsl-hover" style="margin-top:6px;font-size:12px;font-weight:bold;min-height:1.4em;"></div>
+      </div>
+    `;
+
+    return {
+      btnLoad:      tabPane.querySelector('#qrsl-load'),
+      btnLoadLabel: tabPane.querySelector('#qrsl-load-label'),
+      btnClear:     tabPane.querySelector('#qrsl-clear'),
+      btnAlign:     tabPane.querySelector('#qrsl-align'),
+      chkVis:       tabPane.querySelector('#qrsl-toggle'),
+      chkMapped:    tabPane.querySelector('#qrsl-show-mapped'),
+      chkEnds:      tabPane.querySelector('#qrsl-show-ends'),
+      selRoadType:  tabPane.querySelector('#qrsl-roadtype'),
+      statusDiv:    tabPane.querySelector('#qrsl-status'),
+      hoverDiv:     tabPane.querySelector('#qrsl-hover'),
+      endsDiv:      tabPane.querySelector('#qrsl-ends'),
+      endsList:     tabPane.querySelector('#qrsl-ends-list')
+    };
+  }
+
+  // The road layer and what is on it: the loaded cadastre lines, the pieces of them
+  // WME has no road along, the roads added since the load and the align preview.
+  // Loading, adding and aligning change what is in the returned object, then call
+  // update() or render() to show it.
+  function setupRoadLayer(ui) {
     const lines = new Map();     // id -> RoadLine, for the current load
     const pieces = new Map();    // id -> the part of a line WME has no road along
     const imported = new Map();  // id -> { lineId, coords } of segments added since the last load
-    let importedCount = 0;
-    let alignPreview = null;      // { segmentId, original, coords, hasHouseNumbers } awaiting a second press
-    let partial = false;         // the last load hit the page cap or lost pages
-    let isLoading = false;
-    let currentLoadId = 0;
-    let overrideRoadType = null; // null = Auto from category
+    const roads = {
+      lines, pieces, imported,
+      alignPreview: null,        // { segmentId, original, coords, hasHouseNumbers } awaiting a second press
+      partial: false,            // the last load hit the page cap or lost pages
+      update, render, clear, show
+    };
     let layerWanted = LS.getLayerVisible();
-    let showMapped = LS.getShowMapped();
-    let showEnds = LS.getShowEnds();
-    let listedEnds = [];         // dead ends next to a road they aren't connected to, this session
     let layerShown = false;
+    let showMapped = LS.getShowMapped();
     let layerIds = [];
-    let endIds = [];
-
-    try {
-      I18n.translations[I18n.currentLocale()].layers.name[SCRIPT_ID] = 'Quick Road Importer';
-    } catch (_) {}
-
-    // Grey and cyan lines lie exactly on WME segments: the one just created, or a road
-    // WME already has. They let the mouse through, or they would catch the drags and
-    // clicks meant for those segments and their nodes.
-    wmeSDK.Map.addLayer({
-      layerName: SDK_LAYER_NAME,
-      styleRules: [
-        {
-          predicate: (p) => p.state === 'missing',
-          style: {
-            strokeColor: '#ff00ff', strokeWidth: 5, strokeOpacity: 0.85,
-            hoverStrokeColor: '#ffff00', hoverStrokeWidth: 7, cursor: 'pointer'
-          }
-        },
-        {
-          predicate: (p) => p.state === 'reference',
-          style: { strokeColor: '#00e5ff', strokeWidth: 2, strokeOpacity: 0.8, pointerEvents: 'none' }
-        },
-        {
-          predicate: (p) => p.state === 'preview',
-          style: {
-            strokeColor: '#00ff66', strokeWidth: 4, strokeOpacity: 0.9, strokeDashstyle: 'dash',
-            pointerEvents: 'none'
-          }
-        },
-        {
-          predicate: (p) => p.state === 'imported',
-          style: {
-            strokeColor: '#888888', strokeWidth: 4, strokeOpacity: 0.5, strokeDashstyle: 'dash',
-            pointerEvents: 'none'
-          }
-        }
-      ]
-    });
-    wmeSDK.Map.setLayerVisibility({ layerName: SDK_LAYER_NAME, visibility: false });
-    wmeSDK.Events.trackLayerEvents({ layerName: SDK_LAYER_NAME });
-
-    // Its own layer, so the ends show at every zoom and with the roads hidden. Zoomed
-    // out, a ring around a node is lost among the roads, so it becomes a solid dot.
-    // Both sit on a WME node and let the mouse through to it, like the grey lines.
-    wmeSDK.Map.addLayer({
-      layerName: ENDS_LAYER_NAME,
-      styleRules: [
-        {
-          predicate: (p) => p.state === 'ring',
-          style: {
-            pointRadius: 12, fill: false, strokeColor: '#ff8c00', strokeWidth: 3, strokeOpacity: 0.95,
-            pointerEvents: 'none'
-          }
-        },
-        {
-          predicate: (p) => p.state === 'dot',
-          style: {
-            pointRadius: 8, fillColor: '#ff8c00', fillOpacity: 0.9, strokeColor: '#ffffff', strokeWidth: 2,
-            pointerEvents: 'none'
-          }
-        }
-      ]
-    });
 
     function updateLayerVisibility() {
       const visible = layerWanted && wmeSDK.Map.getZoomLevel() >= MIN_LOAD_ZOOM;
@@ -856,24 +930,6 @@
       }
     }
 
-    // Swaps a layer's features and returns the ids now on it. Ids are recorded before
-    // the add: if it throws part-way, removing an id that never landed is harmless,
-    // while an orphan feature would stay clickable.
-    function replaceFeatures(layerName, ids, features) {
-      try {
-        if (ids.length) {
-          wmeSDK.Map.removeFeaturesFromLayer({ layerName, featureIds: ids });
-          ids = [];
-        }
-        if (!features.length) return ids;
-        ids = features.map(f => f.id);
-        wmeSDK.Map.addFeaturesToLayer({ layerName, features });
-      } catch (e) {
-        console.warn('[SL-ROAD] rendering failed:', e);
-      }
-      return ids;
-    }
-
     function render() {
       const feature = (id, coords, state) => ({
         type: 'Feature', id, geometry: { type: 'LineString', coordinates: coords }, properties: { state }
@@ -884,10 +940,322 @@
         ...(showMapped ? [...lines.values()].map(l => feature(`ref-${l.id}`, l.coords, 'reference')) : []),
         ...[...pieces.values()].map(p => feature(p.id, p.coords, 'missing')),
         ...[...imported].map(([id, a]) => feature(id, a.coords, 'imported')),
-        ...(alignPreview ? [feature('align-preview', alignPreview.coords, 'preview')] : [])
+        ...(roads.alignPreview ? [feature('align-preview', roads.alignPreview.coords, 'preview')] : [])
       ];
       layerIds = replaceFeatures(SDK_LAYER_NAME, layerIds, features);
     }
+
+    function updateStatus() {
+      if (!lines.size) {
+        ui.statusDiv.textContent = 'No roads in view.';
+        return;
+      }
+      const open = new Set([...pieces.values(), ...imported.values()].map(p => p.lineId));
+      const mapped = [...lines.keys()].filter(id => !open.has(id)).length;
+      let text = `${pieces.size} missing, ${mapped} already mapped`;
+      if (imported.size) text += `, ${imported.size} added`;
+      if (roads.partial) text += '. Loaded partially, zoom in and load again.';
+      ui.statusDiv.textContent = text;
+    }
+
+    // After a load or an edit: cut the pieces again, draw them and count them.
+    function update() {
+      refreshPieces();
+      render();
+      updateStatus();
+    }
+
+    // Empties the layer, for a new load or a Clear.
+    function clear() {
+      lines.clear();
+      pieces.clear();
+      imported.clear();
+      roads.alignPreview = null;
+      roads.partial = false;
+      render();
+      ui.hoverDiv.textContent = '';
+    }
+
+    // Load is an explicit request to see the result.
+    function show() {
+      if (!layerWanted) {
+        layerWanted = true;
+        setChecked(ui.chkVis, true);
+        LS.setLayerVisible(true);
+      }
+      updateLayerVisibility();
+    }
+
+    setChecked(ui.chkVis, layerWanted);
+    setChecked(ui.chkMapped, showMapped);
+
+    ui.chkVis.addEventListener('click', () => {
+      const on = isChecked(ui.chkVis);
+      setChecked(ui.chkVis, !on);
+      layerWanted = !on;
+      LS.setLayerVisible(!on);
+      updateLayerVisibility();
+    });
+
+    ui.chkMapped.addEventListener('click', () => {
+      const on = isChecked(ui.chkMapped);
+      setChecked(ui.chkMapped, !on);
+      showMapped = !on;
+      LS.setShowMapped(!on);
+      render();
+    });
+
+    wmeSDK.Events.on({ eventName: 'wme-map-zoom-changed', eventHandler: () => updateLayerVisibility() });
+    wmeSDK.Events.on({
+      eventName: 'wme-map-data-loaded',
+      eventHandler: () => {
+        if (lines.size) update();
+      }
+    });
+    updateLayerVisibility();
+
+    return roads;
+  }
+
+  // Load fetches the cadastre roads in view onto the road layer, Clear empties it.
+  function setupLoading(ui, roads) {
+    let isLoading = false;
+    let currentLoadId = 0;
+
+    async function loadRoads() {
+      if (isLoading) return;
+      if (wmeSDK.Map.getZoomLevel() < MIN_LOAD_ZOOM) {
+        toast(`Zoom in to level ${MIN_LOAD_ZOOM}+ to load roads`, 'warning');
+        return;
+      }
+      isLoading = true;
+      const myLoadId = ++currentLoadId;
+
+      // try/finally, or one throw leaves isLoading stuck and every later Load ignored.
+      try {
+        ui.btnLoad.disabled = true;
+        ui.btnLoadLabel.textContent = 'Loading…';
+        roads.clear();
+        ui.statusDiv.textContent = 'Loading roads…';
+
+        const [minLon, minLat, maxLon, maxLat] = mapBounds();
+
+        let result;
+        try {
+          result = await fetchCadastre({ minLon, minLat, maxLon, maxLat }, () => myLoadId !== currentLoadId);
+        } catch (err) {
+          if (myLoadId !== currentLoadId) return;
+          console.warn('[SL-ROAD] fetch failed:', err);
+          const msg = err.userMessage || 'Error fetching roads.';
+          toast(msg, 'error');
+          ui.statusDiv.textContent = msg;
+          return;
+        }
+        if (myLoadId !== currentLoadId) return; // Clear or a newer Load since
+
+        for (const line of buildRoadLines(result.features)) roads.lines.set(line.id, line);
+        roads.partial = !result.complete;
+        roads.update();
+        roads.show();
+      } finally {
+        // After a Clear, Load was already released, and a newer load may own it now.
+        if (myLoadId === currentLoadId) {
+          ui.btnLoad.disabled = false;
+          ui.btnLoadLabel.textContent = 'Load roads in view';
+          isLoading = false;
+        }
+      }
+    }
+
+    // A request in flight can't be cancelled. Bumping the id makes its result drop,
+    // and Load is released now rather than when that request returns.
+    function clearRoads() {
+      currentLoadId++;
+      isLoading = false;
+      ui.btnLoad.disabled = false;
+      ui.btnLoadLabel.textContent = 'Load roads in view';
+      roads.clear();
+      ui.statusDiv.innerHTML = INSTRUCTIONS_HTML;
+    }
+
+    // Wrapped, so the click event never lands in a parameter.
+    ui.btnLoad.addEventListener('click', () => loadRoads());
+    ui.btnClear.addEventListener('click', () => clearRoads());
+
+    return { loadRoads, clearRoads };
+  }
+
+  // One click, one segment from exactly the clicked piece. Junctions and connections
+  // are the editor's job. The road type dropdown and the hover text are here too,
+  // since they decide and show what a click creates.
+  function setupAdding(ui, roads) {
+    let overrideRoadType = null; // null = Auto from category
+    let importedCount = 0;
+
+    ui.selRoadType.addEventListener('change', () => {
+      overrideRoadType = ui.selRoadType.value === '' ? null : Number(ui.selRoadType.value);
+    });
+
+    wmeSDK.Events.on({
+      eventName: 'wme-layer-feature-mouse-enter',
+      eventHandler: ({ featureId, layerName } = {}) => {
+        if (layerName !== SDK_LAYER_NAME) return;
+        const piece = roads.pieces.get(String(featureId));
+        ui.hoverDiv.textContent = piece ? describeLine(piece, overrideRoadType) : '';
+      }
+    });
+    wmeSDK.Events.on({
+      eventName: 'wme-layer-feature-mouse-leave',
+      eventHandler: ({ layerName } = {}) => {
+        if (layerName === SDK_LAYER_NAME) ui.hoverDiv.textContent = '';
+      }
+    });
+
+    function onPieceClicked({ featureId, layerName } = {}) {
+      if (layerName !== SDK_LAYER_NAME) return;
+      const piece = roads.pieces.get(String(featureId));
+      if (!piece) return;
+      if (!wmeSDK.Editing.isEditingAllowed()) {
+        toast('Editing is not allowed here', 'warning');
+        return;
+      }
+
+      const { roadType, unpaved } = planSegment(piece, overrideRoadType);
+      let segmentId;
+      try {
+        segmentId = wmeSDK.DataModel.Segments.addSegment({
+          geometry: { type: 'LineString', coordinates: piece.coords },
+          roadType
+        });
+      } catch (e) {
+        console.error('[SL-ROAD] addSegment failed:', e);
+        toast(`Could not create the segment: ${e.message || e}`, 'error');
+        return;
+      }
+      // From here on the segment exists, so a second click must not make another.
+      roads.imported.set(`added-${++importedCount}`, { lineId: piece.lineId, coords: piece.coords });
+
+      const failed = [];
+      try {
+        // The default direction of a new segment is undocumented, so always set it.
+        wmeSDK.DataModel.Segments.updateSegment(unpaved
+          ? { segmentId, direction: 'TWO_WAY', flagAttributes: { unpaved: true } }
+          : { segmentId, direction: 'TWO_WAY' });
+      } catch (e) {
+        console.error('[SL-ROAD] updateSegment failed:', e);
+        failed.push(unpaved ? 'direction and unpaved' : 'direction');
+      }
+      try {
+        setEmptyAddress(segmentId);
+      } catch (e) {
+        console.error('[SL-ROAD] setting the address failed:', e);
+        failed.push('address');
+      }
+      try {
+        wmeSDK.Editing.setSelection({ selection: { ids: [segmentId], objectType: 'segment' } });
+      } catch (e) {
+        console.error('[SL-ROAD] selecting the new segment failed:', e);
+        failed.push('selection');
+      }
+
+      roads.update();
+      const what = `${roadTypeName(roadType)}, ${Math.round(piece.lengthM)} m`;
+      if (failed.length) {
+        toast(`${what} created, but setting ${failed.join(', ')} failed. Fix it by hand.`, 'warning');
+      } else {
+        toast(`${what} created`, 'success');
+      }
+    }
+
+    wmeSDK.Events.on({ eventName: 'wme-layer-feature-clicked', eventHandler: onPieceClicked });
+  }
+
+  // Align road geometry. The first press draws the selected segment moved onto the
+  // cadastre, a second press on the same, unchanged segment applies it. Anything else
+  // starts over with a fresh preview.
+  function setupAligning(ui, roads) {
+    function alignSelected() {
+      const segmentId = selectedSegmentId();
+      const segment = segmentId == null ? null : wmeSDK.DataModel.Segments.getById({ segmentId });
+      const coords = segment && segment.geometry && segment.geometry.coordinates;
+      if (!coords) {
+        toast('Select one road segment to align', 'warning');
+        return;
+      }
+
+      const preview = roads.alignPreview;
+      if (preview && preview.segmentId === segmentId
+        && JSON.stringify(preview.original) === JSON.stringify(coords)) {
+        applyAlign();
+        return;
+      }
+
+      if (!roads.lines.size) {
+        toast('Load roads in view first', 'warning');
+        return;
+      }
+      const aligned = alignToCadastre(coords, [...roads.lines.values()].map(l => l.coords),
+        COVERAGE_STEP_M, COVERAGE_MAX_DISTANCE_M, ALIGN_END_SKIP_M, SIMPLIFY_TOLERANCE_M);
+      if (!aligned) {
+        roads.alignPreview = null;
+        roads.render();
+        toast('Couldn\'t match this segment to one loaded road, nothing to align it to', 'warning');
+        return;
+      }
+      roads.alignPreview = {
+        segmentId,
+        original: coords.map(p => p.slice()),
+        coords: aligned,
+        hasHouseNumbers: !!segment.hasHouseNumbers
+      };
+      roads.render();
+      toast(`Preview in green: ${aligned.length - 2} geometry nodes. Press Align again to apply.`, 'info');
+    }
+
+    function applyAlign() {
+      const { segmentId, coords, hasHouseNumbers } = roads.alignPreview;
+      if (!wmeSDK.Editing.isEditingAllowed()) {
+        toast('Editing is not allowed here', 'warning');
+        return;
+      }
+      roads.alignPreview = null;
+      roads.render();
+      try {
+        wmeSDK.DataModel.Segments.updateSegment({ segmentId, geometry: { type: 'LineString', coordinates: coords } });
+      } catch (e) {
+        console.error('[SL-ROAD] aligning failed:', e);
+        toast(`Could not align the segment: ${e.message || e}`, 'error');
+        return;
+      }
+      if (hasHouseNumbers) {
+        toast(`Aligned, ${coords.length - 2} geometry nodes. It has house numbers, check them.`, 'warning');
+      } else {
+        toast(`Aligned, ${coords.length - 2} geometry nodes`, 'success');
+      }
+    }
+
+    ui.btnAlign.addEventListener('click', () => alignSelected());
+
+    wmeSDK.Events.on({
+      eventName: 'wme-selection-changed',
+      eventHandler: () => {
+        if (roads.alignPreview && selectedSegmentId() !== roads.alignPreview.segmentId) {
+          roads.alignPreview = null;
+          roads.render();
+        }
+      }
+    });
+
+    return alignSelected;
+  }
+
+  // Rings WME dead ends next to a road they aren't connected to, and lists them in the
+  // sidebar. WME data only, so it runs with or without a cadastre load. Its own layer,
+  // so the ends show at every zoom and with the roads hidden.
+  function setupDisconnectedEnds(ui) {
+    let showEnds = LS.getShowEnds();
+    let listedEnds = [];         // this session's, kept as updateEndsList describes
+    let endIds = [];
 
     function renderEnds() {
       const state = wmeSDK.Map.getZoomLevel() >= MIN_LOAD_ZOOM ? 'ring' : 'dot';
@@ -897,426 +1265,97 @@
       })));
     }
 
-    // [minLon, minLat, maxLon, maxLat] of the view.
-    function mapBounds() {
-      const ext = wmeSDK.Map.getMapExtent();
-      return Array.isArray(ext) ? ext : [ext.lonMin, ext.latMin, ext.lonMax, ext.latMax];
+    // Only right after a data load does the view stand for what WME has loaded: an
+    // edit event can come while WME is still fetching the area just panned to.
+    function refreshEnds(dataLoaded = false) {
+      if (!showEnds) {
+        listedEnds = [];
+      } else {
+        const segments = wmeSDK.DataModel.Segments.getAll();
+        const nodes = wmeSDK.DataModel.Nodes.getAll();
+        const allRoadTypes = wmeSDK.Map.getZoomLevel() >= MIN_LOAD_ZOOM;
+        let spotLoaded = () => false;
+        if (dataLoaded && allRoadTypes) {
+          const [minLon, minLat, maxLon, maxLat] = mapBounds();
+          spotLoaded = ([lon, lat]) => lon >= minLon && lon <= maxLon && lat >= minLat && lat <= maxLat;
+        }
+        listedEnds = updateEndsList(listedEnds, findDisconnectedEnds(segments, nodes, DISCONNECTED_MAX_DISTANCE_M),
+          segments, nodes, { allRoadTypes, spotLoaded });
+      }
+      const n = listedEnds.length;
+      ui.endsDiv.textContent = n ? `${n} disconnected ${n === 1 ? 'end, click it' : 'ends, click one'} to go there` : '';
+      ui.endsList.innerHTML = listedEnds.map(e => `<div data-node="${e.nodeId}" style="cursor:pointer;text-decoration:underline;">`
+        + `${e.coords[1].toFixed(5)}, ${e.coords[0].toFixed(5)}</div>`).join('');
+      renderEnds();
     }
 
-    function resetState() {
-      lines.clear();
-      pieces.clear();
-      imported.clear();
-      alignPreview = null;
-      partial = false;
-    }
+    setChecked(ui.chkEnds, showEnds);
 
-    wmeSDK.Events.on({
-      eventName: 'wme-map-zoom-changed',
-      eventHandler: () => {
-        updateLayerVisibility();
-        renderEnds();
+    ui.chkEnds.addEventListener('click', () => {
+      const on = isChecked(ui.chkEnds);
+      setChecked(ui.chkEnds, !on);
+      showEnds = !on;
+      LS.setShowEnds(!on);
+      refreshEnds();
+    });
+
+    ui.endsList.addEventListener('click', (ev) => {
+      const row = ev.target?.closest?.('[data-node]');
+      const end = row && listedEnds.find(e => String(e.nodeId) === row.dataset.node);
+      if (!end) return;
+      try {
+        wmeSDK.Map.setMapCenter({
+          lonLat: { lon: end.coords[0], lat: end.coords[1] },
+          zoomLevel: Math.max(wmeSDK.Map.getZoomLevel(), END_JUMP_ZOOM)
+        });
+      } catch (e) {
+        console.warn('[SL-ROAD] could not centre the map:', e);
       }
     });
-    updateLayerVisibility();
+
+    wmeSDK.Events.on({ eventName: 'wme-map-zoom-changed', eventHandler: () => renderEnds() });
+    wmeSDK.Events.on({ eventName: 'wme-map-data-loaded', eventHandler: () => refreshEnds(true) });
+
+    // Edits, including connecting a ringed end. WME fires these in bursts, one per
+    // batch of objects, so the refresh waits for the burst to end.
+    let endsTimer = null;
+    const scheduleEnds = () => {
+      clearTimeout(endsTimer);
+      endsTimer = setTimeout(() => refreshEnds(), 100);
+    };
+    wmeSDK.Events.trackDataModelEvents({ dataModelName: 'segments' });
+    wmeSDK.Events.trackDataModelEvents({ dataModelName: 'nodes' });
+    for (const eventName of ['wme-data-model-objects-added', 'wme-data-model-objects-changed', 'wme-data-model-objects-removed']) {
+      wmeSDK.Events.on({
+        eventName,
+        eventHandler: ({ dataModelName } = {}) => {
+          if (dataModelName === 'segments' || dataModelName === 'nodes') scheduleEnds();
+        }
+      });
+    }
+    refreshEnds();
+  }
+
+  function init() {
+    try {
+      I18n.translations[I18n.currentLocale()].layers.name[SCRIPT_ID] = 'Quick Road Importer';
+    } catch (_) {}
+
+    wmeSDK.Map.addLayer({ layerName: SDK_LAYER_NAME, styleRules: ROAD_LAYER_STYLES });
+    wmeSDK.Map.setLayerVisibility({ layerName: SDK_LAYER_NAME, visibility: false });
+    wmeSDK.Events.trackLayerEvents({ layerName: SDK_LAYER_NAME });
+    wmeSDK.Map.addLayer({ layerName: ENDS_LAYER_NAME, styleRules: ENDS_LAYER_STYLES });
 
     wmeSDK.Sidebar.registerScriptTab().then(({ tabLabel, tabPane }) => {
       tabLabel.innerText = 'SL-ROAD';
       tabLabel.title = 'Quick Road Importer (Slovenia)';
+      const ui = buildPane(tabPane);
 
-      const typeOptions = ['<option value="">Auto from category</option>']
-        .concat(ROAD_TYPES.map(t => `<option value="${t.id}">${t.name}</option>`))
-        .join('');
-
-      tabPane.innerHTML = `
-        <div id="qrsl-pane" style="padding:10px;">
-          <h2 style="margin-top:0;">Quick Road Importer 🇸🇮</h2>
-          <div style="display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 8px 0;">
-            <button id="qrsl-load" class="wz-button"><span id="qrsl-load-label">Load roads in view</span> <kbd style="${KBD_STYLE}">Alt+Shift+R</kbd></button>
-            <button id="qrsl-clear" class="wz-button wz-button--secondary">Clear <kbd style="${KBD_STYLE}">Alt+Shift+X</kbd></button>
-          </div>
-          <div style="margin:0 0 8px 0;">
-            <button id="qrsl-align" class="wz-button wz-button--secondary">Align road geometry <kbd style="${KBD_STYLE}">Alt+Shift+G</kbd></button>
-          </div>
-          <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
-            <wz-checkbox id="qrsl-toggle">Show layer</wz-checkbox>
-            <wz-checkbox id="qrsl-show-mapped">Show already mapped roads</wz-checkbox>
-            <wz-checkbox id="qrsl-show-ends">Show disconnected ends</wz-checkbox>
-            <label style="font-size:12px;">Road type <select id="qrsl-roadtype" style="margin-left:6px;">${typeOptions}</select></label>
-          </div>
-          <div id="qrsl-status" style="margin-top:10px;font-size:12px;color:#666;line-height:1.4;">${INSTRUCTIONS_HTML}</div>
-          <div id="qrsl-ends" style="margin-top:6px;font-size:12px;color:#b35f00;"></div>
-          <div id="qrsl-ends-list" style="max-height:160px;overflow-y:auto;font-size:12px;color:#b35f00;"></div>
-          <div id="qrsl-hover" style="margin-top:6px;font-size:12px;font-weight:bold;min-height:1.4em;"></div>
-        </div>
-      `;
-
-      const btnLoad      = tabPane.querySelector('#qrsl-load');
-      const btnLoadLabel = tabPane.querySelector('#qrsl-load-label');
-      const btnClear     = tabPane.querySelector('#qrsl-clear');
-      const btnAlign      = tabPane.querySelector('#qrsl-align');
-      const chkVis       = tabPane.querySelector('#qrsl-toggle');
-      const chkMapped    = tabPane.querySelector('#qrsl-show-mapped');
-      const chkEnds     = tabPane.querySelector('#qrsl-show-ends');
-      const selRoadType  = tabPane.querySelector('#qrsl-roadtype');
-      const statusDiv    = tabPane.querySelector('#qrsl-status');
-      const hoverDiv     = tabPane.querySelector('#qrsl-hover');
-      const endsDiv     = tabPane.querySelector('#qrsl-ends');
-      const endsList    = tabPane.querySelector('#qrsl-ends-list');
-
-      setChecked(chkVis, layerWanted);
-      setChecked(chkMapped, showMapped);
-      setChecked(chkEnds, showEnds);
-
-      chkVis.addEventListener('click', () => {
-        const on = isChecked(chkVis);
-        setChecked(chkVis, !on);
-        layerWanted = !on;
-        LS.setLayerVisible(!on);
-        updateLayerVisibility();
-      });
-
-      chkMapped.addEventListener('click', () => {
-        const on = isChecked(chkMapped);
-        setChecked(chkMapped, !on);
-        showMapped = !on;
-        LS.setShowMapped(!on);
-        render();
-      });
-
-      chkEnds.addEventListener('click', () => {
-        const on = isChecked(chkEnds);
-        setChecked(chkEnds, !on);
-        showEnds = !on;
-        LS.setShowEnds(!on);
-        refreshEnds();
-      });
-
-      selRoadType.addEventListener('change', () => {
-        overrideRoadType = selRoadType.value === '' ? null : Number(selRoadType.value);
-      });
-
-      function updateStatus() {
-        if (!lines.size) {
-          statusDiv.textContent = 'No roads in view.';
-          return;
-        }
-        const open = new Set([...pieces.values(), ...imported.values()].map(p => p.lineId));
-        const mapped = [...lines.keys()].filter(id => !open.has(id)).length;
-        let text = `${pieces.size} missing, ${mapped} already mapped`;
-        if (imported.size) text += `, ${imported.size} added`;
-        if (partial) text += '. Loaded partially, zoom in and load again.';
-        statusDiv.textContent = text;
-      }
-
-      async function loadRoads() {
-        if (isLoading) return;
-        if (wmeSDK.Map.getZoomLevel() < MIN_LOAD_ZOOM) {
-          toast(`Zoom in to level ${MIN_LOAD_ZOOM}+ to load roads`, 'warning');
-          return;
-        }
-        isLoading = true;
-        const myLoadId = ++currentLoadId;
-
-        // try/finally, or one throw leaves isLoading stuck and every later Load ignored.
-        try {
-          btnLoad.disabled = true;
-          btnLoadLabel.textContent = 'Loading…';
-          resetState();
-          render();
-          hoverDiv.textContent = '';
-          statusDiv.textContent = 'Loading roads…';
-
-          const [minLon, minLat, maxLon, maxLat] = mapBounds();
-
-          let result;
-          try {
-            result = await fetchCadastre({ minLon, minLat, maxLon, maxLat }, () => myLoadId !== currentLoadId);
-          } catch (err) {
-            if (myLoadId !== currentLoadId) return;
-            console.warn('[SL-ROAD] fetch failed:', err);
-            const msg = err.userMessage || 'Error fetching roads.';
-            toast(msg, 'error');
-            statusDiv.textContent = msg;
-            return;
-          }
-          if (myLoadId !== currentLoadId) return; // Clear or a newer Load since
-
-          for (const line of buildRoadLines(result.features)) lines.set(line.id, line);
-          partial = !result.complete;
-          refreshPieces();
-          render();
-          updateStatus();
-
-          // Load is an explicit request to see the result.
-          if (!layerWanted) {
-            layerWanted = true;
-            setChecked(chkVis, true);
-            LS.setLayerVisible(true);
-          }
-          updateLayerVisibility();
-        } finally {
-          // After a Clear, Load was already released, and a newer load may own it now.
-          if (myLoadId === currentLoadId) {
-            btnLoad.disabled = false;
-            btnLoadLabel.textContent = 'Load roads in view';
-            isLoading = false;
-          }
-        }
-      }
-
-      // A request in flight can't be cancelled. Bumping the id makes its result drop,
-      // and Load is released now rather than when that request returns.
-      function clearRoads() {
-        currentLoadId++;
-        isLoading = false;
-        btnLoad.disabled = false;
-        btnLoadLabel.textContent = 'Load roads in view';
-        resetState();
-        render();
-        hoverDiv.textContent = '';
-        statusDiv.innerHTML = INSTRUCTIONS_HTML;
-      }
-
-      // Wrapped, so the click event never lands in a parameter.
-      btnLoad.addEventListener('click', () => loadRoads());
-      btnClear.addEventListener('click', () => clearRoads());
-
-      // WME data only, so it runs with or without a cadastre load. Only right after a
-      // data load does the view stand for what WME has loaded: an edit event can come
-      // while WME is still fetching the area just panned to.
-      function refreshEnds(dataLoaded = false) {
-        if (!showEnds) {
-          listedEnds = [];
-        } else {
-          const segments = wmeSDK.DataModel.Segments.getAll();
-          const nodes = wmeSDK.DataModel.Nodes.getAll();
-          const allRoadTypes = wmeSDK.Map.getZoomLevel() >= MIN_LOAD_ZOOM;
-          let spotLoaded = () => false;
-          if (dataLoaded && allRoadTypes) {
-            const [minLon, minLat, maxLon, maxLat] = mapBounds();
-            spotLoaded = ([lon, lat]) => lon >= minLon && lon <= maxLon && lat >= minLat && lat <= maxLat;
-          }
-          listedEnds = updateEndsList(listedEnds, findDisconnectedEnds(segments, nodes, DISCONNECTED_MAX_DISTANCE_M),
-            segments, nodes, { allRoadTypes, spotLoaded });
-        }
-        const n = listedEnds.length;
-        endsDiv.textContent = n ? `${n} disconnected ${n === 1 ? 'end, click it' : 'ends, click one'} to go there` : '';
-        endsList.innerHTML = listedEnds.map(e => `<div data-node="${e.nodeId}" style="cursor:pointer;text-decoration:underline;">`
-          + `${e.coords[1].toFixed(5)}, ${e.coords[0].toFixed(5)}</div>`).join('');
-        renderEnds();
-      }
-
-      endsList.addEventListener('click', (ev) => {
-        const row = ev.target?.closest?.('[data-node]');
-        const end = row && listedEnds.find(e => String(e.nodeId) === row.dataset.node);
-        if (!end) return;
-        try {
-          wmeSDK.Map.setMapCenter({
-            lonLat: { lon: end.coords[0], lat: end.coords[1] },
-            zoomLevel: Math.max(wmeSDK.Map.getZoomLevel(), END_JUMP_ZOOM)
-          });
-        } catch (e) {
-          console.warn('[SL-ROAD] could not centre the map:', e);
-        }
-      });
-
-      wmeSDK.Events.on({
-        eventName: 'wme-map-data-loaded',
-        eventHandler: () => {
-          refreshEnds(true);
-          if (!lines.size) return;
-          refreshPieces();
-          render();
-          updateStatus();
-        }
-      });
-
-      // Edits, including connecting a ringed end. WME fires these in bursts, one per
-      // batch of objects, so the refresh waits for the burst to end.
-      let endsTimer = null;
-      const scheduleEnds = () => {
-        clearTimeout(endsTimer);
-        endsTimer = setTimeout(() => refreshEnds(), 100);
-      };
-      wmeSDK.Events.trackDataModelEvents({ dataModelName: 'segments' });
-      wmeSDK.Events.trackDataModelEvents({ dataModelName: 'nodes' });
-      for (const eventName of ['wme-data-model-objects-added', 'wme-data-model-objects-changed', 'wme-data-model-objects-removed']) {
-        wmeSDK.Events.on({
-          eventName,
-          eventHandler: ({ dataModelName } = {}) => {
-            if (dataModelName === 'segments' || dataModelName === 'nodes') scheduleEnds();
-          }
-        });
-      }
-      refreshEnds();
-
-      wmeSDK.Events.on({
-        eventName: 'wme-layer-feature-mouse-enter',
-        eventHandler: ({ featureId, layerName } = {}) => {
-          if (layerName !== SDK_LAYER_NAME) return;
-          const piece = pieces.get(String(featureId));
-          hoverDiv.textContent = piece ? describeLine(piece, overrideRoadType) : '';
-        }
-      });
-      wmeSDK.Events.on({
-        eventName: 'wme-layer-feature-mouse-leave',
-        eventHandler: ({ layerName } = {}) => {
-          if (layerName === SDK_LAYER_NAME) hoverDiv.textContent = '';
-        }
-      });
-
-      // The empty street with no city, in the country WME is centred on.
-      function setEmptyAddress(segmentId) {
-        const country = wmeSDK.DataModel.Countries.getTopCountry();
-        if (!country) throw new Error('WME has no top country here');
-        const countryId = country.id;
-        const city = wmeSDK.DataModel.Cities.getCity({ cityName: '', countryId })
-          || wmeSDK.DataModel.Cities.addCity({ cityName: '', countryId });
-        const street = wmeSDK.DataModel.Streets.getStreet({ streetName: '', cityId: city.id })
-          || wmeSDK.DataModel.Streets.addStreet({ streetName: '', cityId: city.id });
-        wmeSDK.DataModel.Segments.updateAddress({ segmentId, addressData: { primaryStreetId: street.id } });
-      }
-
-      // One click, one segment from exactly the clicked piece. Junctions and
-      // connections are the editor's job.
-      function onPieceClicked({ featureId, layerName } = {}) {
-        if (layerName !== SDK_LAYER_NAME) return;
-        const piece = pieces.get(String(featureId));
-        if (!piece) return;
-        if (!wmeSDK.Editing.isEditingAllowed()) {
-          toast('Editing is not allowed here', 'warning');
-          return;
-        }
-
-        const { roadType, unpaved } = planSegment(piece, overrideRoadType);
-        let segmentId;
-        try {
-          segmentId = wmeSDK.DataModel.Segments.addSegment({
-            geometry: { type: 'LineString', coordinates: piece.coords },
-            roadType
-          });
-        } catch (e) {
-          console.error('[SL-ROAD] addSegment failed:', e);
-          toast(`Could not create the segment: ${e.message || e}`, 'error');
-          return;
-        }
-        // From here on the segment exists, so a second click must not make another.
-        imported.set(`added-${++importedCount}`, { lineId: piece.lineId, coords: piece.coords });
-
-        const failed = [];
-        try {
-          // The default direction of a new segment is undocumented, so always set it.
-          wmeSDK.DataModel.Segments.updateSegment(unpaved
-            ? { segmentId, direction: 'TWO_WAY', flagAttributes: { unpaved: true } }
-            : { segmentId, direction: 'TWO_WAY' });
-        } catch (e) {
-          console.error('[SL-ROAD] updateSegment failed:', e);
-          failed.push(unpaved ? 'direction and unpaved' : 'direction');
-        }
-        try {
-          setEmptyAddress(segmentId);
-        } catch (e) {
-          console.error('[SL-ROAD] setting the address failed:', e);
-          failed.push('address');
-        }
-        try {
-          wmeSDK.Editing.setSelection({ selection: { ids: [segmentId], objectType: 'segment' } });
-        } catch (e) {
-          console.error('[SL-ROAD] selecting the new segment failed:', e);
-          failed.push('selection');
-        }
-
-        refreshPieces();
-        render();
-        updateStatus();
-        const what = `${roadTypeName(roadType)}, ${Math.round(piece.lengthM)} m`;
-        if (failed.length) {
-          toast(`${what} created, but setting ${failed.join(', ')} failed. Fix it by hand.`, 'warning');
-        } else {
-          toast(`${what} created`, 'success');
-        }
-      }
-
-      wmeSDK.Events.on({ eventName: 'wme-layer-feature-clicked', eventHandler: onPieceClicked });
-
-      function selectedSegmentId() {
-        const sel = wmeSDK.Editing.getSelection();
-        return sel && sel.objectType === 'segment' && sel.ids.length === 1 ? sel.ids[0] : null;
-      }
-
-      // First press draws the aligned shape, a second press on the same, unchanged
-      // segment applies it. Anything else starts over with a fresh preview.
-      function alignSelected() {
-        const segmentId = selectedSegmentId();
-        const segment = segmentId == null ? null : wmeSDK.DataModel.Segments.getById({ segmentId });
-        const coords = segment && segment.geometry && segment.geometry.coordinates;
-        if (!coords) {
-          toast('Select one road segment to align', 'warning');
-          return;
-        }
-
-        if (alignPreview && alignPreview.segmentId === segmentId
-          && JSON.stringify(alignPreview.original) === JSON.stringify(coords)) {
-          applyAlign();
-          return;
-        }
-
-        if (!lines.size) {
-          toast('Load roads in view first', 'warning');
-          return;
-        }
-        const aligned = alignToCadastre(coords, [...lines.values()].map(l => l.coords),
-          COVERAGE_STEP_M, COVERAGE_MAX_DISTANCE_M, ALIGN_END_SKIP_M, SIMPLIFY_TOLERANCE_M);
-        if (!aligned) {
-          alignPreview = null;
-          render();
-          toast('Couldn\'t match this segment to one loaded road, nothing to align it to', 'warning');
-          return;
-        }
-        alignPreview = {
-          segmentId,
-          original: coords.map(p => p.slice()),
-          coords: aligned,
-          hasHouseNumbers: !!segment.hasHouseNumbers
-        };
-        render();
-        toast(`Preview in green: ${aligned.length - 2} geometry nodes. Press Align again to apply.`, 'info');
-      }
-
-      function applyAlign() {
-        const { segmentId, coords, hasHouseNumbers } = alignPreview;
-        if (!wmeSDK.Editing.isEditingAllowed()) {
-          toast('Editing is not allowed here', 'warning');
-          return;
-        }
-        alignPreview = null;
-        render();
-        try {
-          wmeSDK.DataModel.Segments.updateSegment({ segmentId, geometry: { type: 'LineString', coordinates: coords } });
-        } catch (e) {
-          console.error('[SL-ROAD] aligning failed:', e);
-          toast(`Could not align the segment: ${e.message || e}`, 'error');
-          return;
-        }
-        if (hasHouseNumbers) {
-          toast(`Aligned, ${coords.length - 2} geometry nodes. It has house numbers, check them.`, 'warning');
-        } else {
-          toast(`Aligned, ${coords.length - 2} geometry nodes`, 'success');
-        }
-      }
-
-      btnAlign.addEventListener('click', () => alignSelected());
-
-      wmeSDK.Events.on({
-        eventName: 'wme-selection-changed',
-        eventHandler: () => {
-          if (alignPreview && selectedSegmentId() !== alignPreview.segmentId) {
-            alignPreview = null;
-            render();
-          }
-        }
-      });
+      const roads = setupRoadLayer(ui);
+      const { loadRoads, clearRoads } = setupLoading(ui, roads);
+      setupAdding(ui, roads);
+      const alignSelected = setupAligning(ui, roads);
+      setupDisconnectedEnds(ui);
 
       // Align was called Snap once. Its shortcut id stays, or a key an editor rebound
       // would be lost.
