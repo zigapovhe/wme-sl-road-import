@@ -16,7 +16,7 @@ const path = require('node:path');
 
 const SCRIPT_PATH = path.join(__dirname, '..', 'wme-sl-road-import.user.js');
 const LAYER = 'qrsl-roads';
-const LOOSE_LAYER = 'qrsl-loose';
+const ENDS_LAYER = 'qrsl-ends';
 
 const FOREST_ID = '300200000000000017-0/0'; // line 300200000000000017-0, first missing piece
 const FOREST_COORDS = [[14.55, 46.05], [14.551, 46.05], [14.551, 46.051]];
@@ -203,5 +203,5 @@ const features = (ctx) => ctx.layers.get(LAYER).features;
 
 module.exports = {
   bootScript, waitFor, fire, argsOf, shortcut, load, features,
-  LAYER, LOOSE_LAYER, FOREST, FOREST_ID, FOREST_COORDS, DEFAULT_CADASTRE
+  LAYER, ENDS_LAYER, FOREST, FOREST_ID, FOREST_COORDS, DEFAULT_CADASTRE
 };

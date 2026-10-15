@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { looseEnds, updateLooseList } = require('../wme-sl-road-import.user.js');
+const { findDisconnectedEnds, updateEndsList } = require('../wme-sl-road-import.user.js');
 
 const LON0 = 14.5;
 const LAT0 = 46;
@@ -30,24 +30,24 @@ function network(segs) {
 }
 
 // The value the runtime uses.
-const loose = (segs) => {
+const disconnected = (segs) => {
   const { segments, nodes } = network(segs);
-  return looseEnds(segments, nodes, 5).map(e => e.nodeId).sort((a, b) => a - b);
+  return findDisconnectedEnds(segments, nodes, 5).map(e => e.nodeId).sort((a, b) => a - b);
 };
 
 const MAIN = { id: 1, from: 1, to: 2, coords: [at(-100, 0), at(100, 0)] };
 
 test('a dead end a few metres from another road is flagged', () => {
-  assert.deepStrictEqual(loose([MAIN, { id: 2, from: 3, to: 4, coords: [at(0, 3), at(0, 100)] }]), [3]);
+  assert.deepStrictEqual(disconnected([MAIN, { id: 2, from: 3, to: 4, coords: [at(0, 3), at(0, 100)] }]), [3]);
 });
 
 test('the flag sits on the dead end node', () => {
   const { segments, nodes } = network([MAIN, { id: 2, from: 3, to: 4, coords: [at(0, 3), at(0, 100)] }]);
-  assert.deepStrictEqual(looseEnds(segments, nodes, 5), [{ nodeId: 3, segmentId: 2, coords: at(0, 3) }]);
+  assert.deepStrictEqual(findDisconnectedEnds(segments, nodes, 5), [{ nodeId: 3, segmentId: 2, coords: at(0, 3) }]);
 });
 
 test('a road joined at a node is not flagged', () => {
-  assert.deepStrictEqual(loose([
+  assert.deepStrictEqual(disconnected([
     { id: 1, from: 1, to: 5, coords: [at(-100, 0), at(0, 0)] },
     { id: 3, from: 5, to: 2, coords: [at(0, 0), at(100, 0)] },
     { id: 2, from: 5, to: 4, coords: [at(0, 0), at(0, 100)] }
@@ -55,16 +55,16 @@ test('a road joined at a node is not flagged', () => {
 });
 
 test('a dead end further than 5 m from any road is left alone', () => {
-  assert.deepStrictEqual(loose([MAIN, { id: 2, from: 3, to: 4, coords: [at(0, 8), at(0, 100)] }]), []);
+  assert.deepStrictEqual(disconnected([MAIN, { id: 2, from: 3, to: 4, coords: [at(0, 8), at(0, 100)] }]), []);
 });
 
 test('a dead end with nothing near it is not flagged', () => {
   // Its own segment is right there, but that is not another road.
-  assert.deepStrictEqual(loose([MAIN]), []);
+  assert.deepStrictEqual(disconnected([MAIN]), []);
 });
 
 test('two roads ending on top of each other are both flagged', () => {
-  assert.deepStrictEqual(loose([
+  assert.deepStrictEqual(disconnected([
     { id: 1, from: 1, to: 2, coords: [at(-100, 0), at(0, 0)] },
     { id: 2, from: 3, to: 4, coords: [at(1, 1), at(100, 0)] }
   ]), [2, 3]);
@@ -72,11 +72,11 @@ test('two roads ending on top of each other are both flagged', () => {
 
 test('railways, ferries and runways never count, either way round', () => {
   for (const roadType of [15, 18, 19]) {
-    assert.deepStrictEqual(loose([
+    assert.deepStrictEqual(disconnected([
       { ...MAIN, roadType },
       { id: 2, from: 3, to: 4, coords: [at(0, 3), at(0, 100)] }
     ]), [], `a road ending next to road type ${roadType}`);
-    assert.deepStrictEqual(loose([
+    assert.deepStrictEqual(disconnected([
       MAIN,
       { id: 2, from: 3, to: 4, coords: [at(0, 3), at(0, 100)], roadType }
     ]), [], `road type ${roadType} ending next to a road`);
@@ -86,22 +86,22 @@ test('railways, ferries and runways never count, either way round', () => {
 test('a node whose segment WME has not loaded is skipped', () => {
   const { segments, nodes } = network([MAIN]);
   nodes.push({ id: 9, geometry: { type: 'Point', coordinates: at(0, 3) }, connectedSegmentIds: [99] });
-  assert.deepStrictEqual(looseEnds(segments, nodes, 5), []);
+  assert.deepStrictEqual(findDisconnectedEnds(segments, nodes, 5), []);
 });
 
 test('missing geometry is skipped', () => {
   const { segments, nodes } = network([MAIN, { id: 2, from: 3, to: 4, coords: [at(0, 3), at(0, 100)] }]);
   segments.push({ id: 7, roadType: 1, fromNodeId: 8, toNodeId: 9, geometry: null });
   nodes.push({ id: 8, geometry: null, connectedSegmentIds: [7] });
-  assert.deepStrictEqual(looseEnds(segments, nodes, 5).map(e => e.nodeId), [3]);
+  assert.deepStrictEqual(findDisconnectedEnds(segments, nodes, 5).map(e => e.nodeId), [3]);
 });
 
-// The session list, from ends as looseEnds returns them.
+// The session list, from ends as findDisconnectedEnds returns them.
 const end = (nodeId, segmentId, coords = at(0, 3)) => ({ nodeId, segmentId, coords });
 const ZOOMED_IN = { allRoadTypes: true, spotLoaded: () => false };
 const listed = (list, found, segs, extra = {}) => {
   const { segments, nodes } = network(segs);
-  return updateLooseList(list, found, segments, nodes.concat(extra.nodes || []), { ...ZOOMED_IN, ...extra.view });
+  return updateEndsList(list, found, segments, nodes.concat(extra.nodes || []), { ...ZOOMED_IN, ...extra.view });
 };
 
 test('a listed end stays while WME has none of it loaded', () => {
@@ -167,7 +167,7 @@ test('a deleted road drops off only once WME has loaded its spot', () => {
 test('a loaded spot does not drop an end that is still there', () => {
   const segs = [MAIN, { id: 2, from: 3, to: 4, coords: [at(0, 3), at(0, 100)] }];
   const { segments, nodes } = network(segs);
-  const found = looseEnds(segments, nodes, 5);
-  assert.deepStrictEqual(updateLooseList([end(3, 2)], found, segments, nodes, { allRoadTypes: true, spotLoaded: () => true }),
+  const found = findDisconnectedEnds(segments, nodes, 5);
+  assert.deepStrictEqual(updateEndsList([end(3, 2)], found, segments, nodes, { allRoadTypes: true, spotLoaded: () => true }),
     [end(3, 2)]);
 });

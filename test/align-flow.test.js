@@ -17,7 +17,7 @@ const press = (ctx) => shortcut(ctx.calls, 'qrsl-snap')();
 const preview = (ctx) => features(ctx).find(f => f.properties.state === 'preview');
 const updates = (ctx) => argsOf(ctx.calls, 'DataModel.Segments.updateSegment');
 
-test('the first press previews the snapped shape, the second applies it', async () => {
+test('the first press previews the aligned shape, the second applies it', async () => {
   await bootScript({}, async (ctx) => {
     await load(ctx);
     press(ctx);
@@ -72,7 +72,7 @@ test('a segment the cadastre doesn\'t follow is left alone', async () => {
   }, { selection: SELECTED, segments: { 1: segment([[14.56, 46.06], [14.561, 46.06]]) } });
 });
 
-test('before a load there is nothing to snap to', async () => {
+test('before a load there is nothing to align to', async () => {
   await bootScript({}, async (ctx) => {
     press(ctx);
     press(ctx);

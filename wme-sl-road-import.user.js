@@ -25,7 +25,7 @@
   let wmeSDK;
   const SCRIPT_ID = 'quick-road-sl-importer';
   const SDK_LAYER_NAME = 'qrsl-roads';
-  const LOOSE_LAYER_NAME = 'qrsl-loose';
+  const ENDS_LAYER_NAME = 'qrsl-ends';
 
   const CADASTRE_API = 'https://ipi.eprostor.gov.si/wfs-si-gurs-kgi/ogc/features/collections/SI.GURS.KGI:LINIJE_CESTE_G/items';
   const CADASTRE_LIMIT = 1000;
@@ -45,22 +45,24 @@
   const COVERAGE_STEP_M = 5;
   const COVERAGE_MAX_DISTANCE_M = 15;
   const MIN_PIECE_LENGTH_M = 30;
-  // Junctions are where WME and the cadastre disagree most, so a snap tolerates no
+  // Junctions are where WME and the cadastre disagree most, so aligning tolerates no
   // match this close to either end of the segment.
-  const SNAP_END_SKIP_M = 15;
+  const ALIGN_END_SKIP_M = 15;
   // Further than this, a dead end next to a road is more likely a real dead end than
   // a junction the editor missed.
-  const LOOSE_END_MAX_DISTANCE_M = 5;
+  const DISCONNECTED_MAX_DISTANCE_M = 5;
   // Close enough to drag a node onto a road.
-  const LOOSE_JUMP_ZOOM = 18;
+  const END_JUMP_ZOOM = 18;
 
   const LS = {
     getLayerVisible() { return localStorage.getItem('qrsl-layer-visible') !== '0'; }, // default on
     setLayerVisible(v){ localStorage.setItem('qrsl-layer-visible', v ? '1' : '0'); },
     getShowMapped()   { return localStorage.getItem('qrsl-show-mapped') === '1'; },
     setShowMapped(v)  { localStorage.setItem('qrsl-show-mapped', v ? '1' : '0'); },
-    getShowLoose()    { return localStorage.getItem('qrsl-show-loose') !== '0'; },  // default on
-    setShowLoose(v)   { localStorage.setItem('qrsl-show-loose', v ? '1' : '0'); }
+    // Disconnected ends were called loose ends once. The key stays, or the saved
+    // setting would be lost.
+    getShowEnds()     { return localStorage.getItem('qrsl-show-loose') !== '0'; },  // default on
+    setShowEnds(v)    { localStorage.setItem('qrsl-show-loose', v ? '1' : '0'); }
   };
 
   const INSTRUCTIONS_HTML = `<b>Instructions</b><br/>
@@ -355,9 +357,9 @@
   const ALONGSIDE_MAX_ANGLE_DEG = 45;
   const ALONGSIDE_MIN_COS2 = Math.cos(ALONGSIDE_MAX_ANGLE_DEG * Math.PI / 180) ** 2;
 
-  // A snap needs the cadastre alongside at least this share of the segment's samples.
+  // Aligning needs the cadastre alongside at least this share of the segment's samples.
   // Less, and the line matching at both ends is probably a different road between them.
-  const SNAP_MIN_MATCHED = 0.5;
+  const ALIGN_MIN_MATCHED = 0.5;
 
   // Whether direction u and the edge a-b are within ALONGSIDE_MAX_ANGLE_DEG of each
   // other, either way round.
@@ -369,15 +371,15 @@
     return vv > 0 && dot * dot >= ALONGSIDE_MIN_COS2 * (u[0] * u[0] + u[1] * u[1]) * vv;
   }
 
-  // The stretches of a cadastre line with no WME road running alongside it within
+  // The pieces of a cadastre line with no WME road running alongside it within
   // maxDistM, as [lon, lat] lines. Sampled every stepM metres rather than measured as
   // overlap, so a WME road drawn a few metres off the cadastre (the usual case) still
   // counts. segments come from prepareSegments.
   //
-  // Stretches shorter than minLengthM are dropped: they are usually the same road
+  // Pieces shorter than minLengthM are dropped: they are usually the same road
   // drawn slightly differently on a bend. A line with nothing alongside it at all is
   // kept whole, however short.
-  function missingStretches(coords, segments, stepM, maxDistM, minLengthM) {
+  function missingPieces(coords, segments, stepM, maxDistM, minLengthM) {
     if (coords.length < 2) return [];
 
     const box = bboxOf(coords);
@@ -402,17 +404,17 @@
     });
     if (!near.some(Boolean)) return [coords.slice()];
 
-    const stretches = [];
+    const pieces = [];
     for (let k = 0; k < ds.length; k++) {
       if (near[k]) continue;
       let j = k;
       while (j + 1 < ds.length && !near[j + 1]) j++;
       const fromM = ds[k];
       const toM = ds[j];
-      if (toM - fromM >= minLengthM) stretches.push(subLine(coords, cum, fromM, toM));
+      if (toM - fromM >= minLengthM) pieces.push(subLine(coords, cum, fromM, toM));
       k = j;
     }
-    return stretches;
+    return pieces;
   }
 
   // Ferries, railways and runways are never joined to roads, so a road ending next to
@@ -422,7 +424,7 @@
   // Dead ends (nodes with one segment) within maxDistM of another road: usually a
   // junction the editor meant to make and missed by a few metres. Takes the SDK's
   // segments and nodes, returns [{ nodeId, segmentId, coords }].
-  function looseEnds(segments, nodes, maxDistM) {
+  function findDisconnectedEnds(segments, nodes, maxDistM) {
     const roads = [];
     for (const s of segments) {
       const coords = s?.geometry?.coordinates;
@@ -451,14 +453,14 @@
     return found;
   }
 
-  // The session's list of disconnected ends after a refresh, given what looseEnds
+  // The session's list of disconnected ends after a refresh, given what findDisconnectedEnds
   // finds now. An end stays listed until WME shows it fixed, so panning away doesn't
   // lose it: its node got a second segment, its segment now ends at another node
   // (dragged onto a road), or both are gone from a spot WME has just loaded (the road
   // was deleted). Still a dead end with no road near counts only with every road type
   // loaded: zoomed out WME has just the bigger roads, maybe not the one it misses.
   // view: { allRoadTypes, spotLoaded(coords) }. Listed ends keep their place.
-  function updateLooseList(listed, found, segments, nodes, view) {
+  function updateEndsList(listed, found, segments, nodes, view) {
     const now = new Map(found.map(e => [e.nodeId, e]));
     const segmentIds = new Set(segments.map(s => s?.id));
     const nodeById = new Map(nodes.map(n => [n?.id, n]));
@@ -499,7 +501,7 @@
   // carriageways doesn't zigzag. Samples with no match are left out.
   //
   // null when the segment's first or last match is more than endSkipM from its end,
-  // or when under SNAP_MIN_MATCHED of it matches (probably a different road).
+  // or when under ALIGN_MIN_MATCHED of it matches (probably a different road).
   function matchAlong(segCoords, project, candidates, stepM, maxDistM, endSkipM) {
     const segPts = segCoords.map(project);
     const segCum = cumulative(segPts);
@@ -535,7 +537,7 @@
       matches.push({ ...m, d });
     }
     if (!matches.length || matches[matches.length - 1].d < total - endSkipM) return null;
-    if (matches.length < SNAP_MIN_MATCHED * ds.length) return null;
+    if (matches.length < ALIGN_MIN_MATCHED * ds.length) return null;
     return matches;
   }
 
@@ -583,9 +585,9 @@
 
   // New geometry for a WME segment, moved onto the cadastre line(s) running alongside
   // it. The two end points are the segment's own, so its nodes and connections stay
-  // where they are. null, since half a snap is worse than none, whenever matchAlong or
+  // where they are. null, since a half-aligned road is worse than none, whenever matchAlong or
   // pathThrough gives up.
-  function snapToCadastre(segCoords, cadastreLines, stepM, maxDistM, endSkipM, toleranceM) {
+  function alignToCadastre(segCoords, cadastreLines, stepM, maxDistM, endSkipM, toleranceM) {
     if (segCoords.length < 2) return null;
     const project = makeLocalProjection(segCoords[0]);
 
@@ -776,18 +778,18 @@
     const pieces = new Map();    // id -> the part of a line WME has no road along
     const imported = new Map();  // id -> { lineId, coords } of segments added since the last load
     let importedCount = 0;
-    let snapPreview = null;      // { segmentId, original, coords, hasHouseNumbers } awaiting a second press
+    let alignPreview = null;      // { segmentId, original, coords, hasHouseNumbers } awaiting a second press
     let partial = false;         // the last load hit the page cap or lost pages
     let isLoading = false;
     let currentLoadId = 0;
     let overrideRoadType = null; // null = Auto from category
     let layerWanted = LS.getLayerVisible();
     let showMapped = LS.getShowMapped();
-    let showLoose = LS.getShowLoose();
-    let looseNodes = [];         // dead ends next to a road they aren't connected to, this session
+    let showEnds = LS.getShowEnds();
+    let listedEnds = [];         // dead ends next to a road they aren't connected to, this session
     let layerShown = false;
     let layerIds = [];
-    let looseIds = [];
+    let endIds = [];
 
     try {
       I18n.translations[I18n.currentLocale()].layers.name[SCRIPT_ID] = 'Quick Road Importer';
@@ -833,17 +835,17 @@
     // out, a ring around a node is lost among the roads, so it becomes a solid dot.
     // Both sit on a WME node and let the mouse through to it, like the grey lines.
     wmeSDK.Map.addLayer({
-      layerName: LOOSE_LAYER_NAME,
+      layerName: ENDS_LAYER_NAME,
       styleRules: [
         {
-          predicate: (p) => p.state === 'loose',
+          predicate: (p) => p.state === 'ring',
           style: {
             pointRadius: 12, fill: false, strokeColor: '#ff8c00', strokeWidth: 3, strokeOpacity: 0.95,
             pointerEvents: 'none'
           }
         },
         {
-          predicate: (p) => p.state === 'loose-dot',
+          predicate: (p) => p.state === 'dot',
           style: {
             pointRadius: 8, fillColor: '#ff8c00', fillOpacity: 0.9, strokeColor: '#ffffff', strokeWidth: 2,
             pointerEvents: 'none'
@@ -865,7 +867,7 @@
       layerShown = visible;
     }
 
-    // Cuts every line down to the stretches WME has no road along. What this session
+    // Cuts every line down to the pieces WME has no road along. What this session
     // added counts as a road too, so a piece can't reappear beside its own segment
     // before WME lists that segment.
     function refreshPieces() {
@@ -874,7 +876,7 @@
         .concat([...imported.values()].map(a => a.coords)));
       pieces.clear();
       for (const line of lines.values()) {
-        missingStretches(line.coords, segments, COVERAGE_STEP_M, COVERAGE_MAX_DISTANCE_M, MIN_PIECE_LENGTH_M)
+        missingPieces(line.coords, segments, COVERAGE_STEP_M, COVERAGE_MAX_DISTANCE_M, MIN_PIECE_LENGTH_M)
           .forEach((coords, k) => {
             const id = `${line.id}/${k}`;
             pieces.set(id, { id, lineId: line.id, category: line.category, coords, lengthM: lineLengthM(coords) });
@@ -910,15 +912,15 @@
         ...(showMapped ? [...lines.values()].map(l => feature(`ref-${l.id}`, l.coords, 'reference')) : []),
         ...[...pieces.values()].map(p => feature(p.id, p.coords, 'missing')),
         ...[...imported].map(([id, a]) => feature(id, a.coords, 'imported')),
-        ...(snapPreview ? [feature('snap-preview', snapPreview.coords, 'preview')] : [])
+        ...(alignPreview ? [feature('align-preview', alignPreview.coords, 'preview')] : [])
       ];
       layerIds = replaceFeatures(SDK_LAYER_NAME, layerIds, features);
     }
 
-    function renderLoose() {
-      const state = wmeSDK.Map.getZoomLevel() >= MIN_LOAD_ZOOM ? 'loose' : 'loose-dot';
-      looseIds = replaceFeatures(LOOSE_LAYER_NAME, looseIds, looseNodes.map(e => ({
-        type: 'Feature', id: `loose-${e.nodeId}`, geometry: { type: 'Point', coordinates: e.coords },
+    function renderEnds() {
+      const state = wmeSDK.Map.getZoomLevel() >= MIN_LOAD_ZOOM ? 'ring' : 'dot';
+      endIds = replaceFeatures(ENDS_LAYER_NAME, endIds, listedEnds.map(e => ({
+        type: 'Feature', id: `end-${e.nodeId}`, geometry: { type: 'Point', coordinates: e.coords },
         properties: { state }
       })));
     }
@@ -933,7 +935,7 @@
       lines.clear();
       pieces.clear();
       imported.clear();
-      snapPreview = null;
+      alignPreview = null;
       partial = false;
     }
 
@@ -941,7 +943,7 @@
       eventName: 'wme-map-zoom-changed',
       eventHandler: () => {
         updateLayerVisibility();
-        renderLoose();
+        renderEnds();
       }
     });
     updateLayerVisibility();
@@ -962,17 +964,17 @@
             <button id="qrsl-clear" class="wz-button wz-button--secondary">Clear <kbd style="${KBD_STYLE}">Alt+Shift+X</kbd></button>
           </div>
           <div style="margin:0 0 8px 0;">
-            <button id="qrsl-snap" class="wz-button wz-button--secondary">Align road geometry <kbd style="${KBD_STYLE}">Alt+Shift+G</kbd></button>
+            <button id="qrsl-align" class="wz-button wz-button--secondary">Align road geometry <kbd style="${KBD_STYLE}">Alt+Shift+G</kbd></button>
           </div>
           <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
             <wz-checkbox id="qrsl-toggle">Show layer</wz-checkbox>
             <wz-checkbox id="qrsl-show-mapped">Show already mapped roads</wz-checkbox>
-            <wz-checkbox id="qrsl-show-loose">Show disconnected ends</wz-checkbox>
+            <wz-checkbox id="qrsl-show-ends">Show disconnected ends</wz-checkbox>
             <label style="font-size:12px;">Road type <select id="qrsl-roadtype" style="margin-left:6px;">${typeOptions}</select></label>
           </div>
           <div id="qrsl-status" style="margin-top:10px;font-size:12px;color:#666;line-height:1.4;">${INSTRUCTIONS_HTML}</div>
-          <div id="qrsl-loose" style="margin-top:6px;font-size:12px;color:#b35f00;"></div>
-          <div id="qrsl-loose-list" style="max-height:160px;overflow-y:auto;font-size:12px;color:#b35f00;"></div>
+          <div id="qrsl-ends" style="margin-top:6px;font-size:12px;color:#b35f00;"></div>
+          <div id="qrsl-ends-list" style="max-height:160px;overflow-y:auto;font-size:12px;color:#b35f00;"></div>
           <div id="qrsl-hover" style="margin-top:6px;font-size:12px;font-weight:bold;min-height:1.4em;"></div>
         </div>
       `;
@@ -980,19 +982,19 @@
       const btnLoad      = tabPane.querySelector('#qrsl-load');
       const btnLoadLabel = tabPane.querySelector('#qrsl-load-label');
       const btnClear     = tabPane.querySelector('#qrsl-clear');
-      const btnSnap      = tabPane.querySelector('#qrsl-snap');
+      const btnAlign      = tabPane.querySelector('#qrsl-align');
       const chkVis       = tabPane.querySelector('#qrsl-toggle');
       const chkMapped    = tabPane.querySelector('#qrsl-show-mapped');
-      const chkLoose     = tabPane.querySelector('#qrsl-show-loose');
+      const chkEnds     = tabPane.querySelector('#qrsl-show-ends');
       const selRoadType  = tabPane.querySelector('#qrsl-roadtype');
       const statusDiv    = tabPane.querySelector('#qrsl-status');
       const hoverDiv     = tabPane.querySelector('#qrsl-hover');
-      const looseDiv     = tabPane.querySelector('#qrsl-loose');
-      const looseList    = tabPane.querySelector('#qrsl-loose-list');
+      const endsDiv     = tabPane.querySelector('#qrsl-ends');
+      const endsList    = tabPane.querySelector('#qrsl-ends-list');
 
       setChecked(chkVis, layerWanted);
       setChecked(chkMapped, showMapped);
-      setChecked(chkLoose, showLoose);
+      setChecked(chkEnds, showEnds);
 
       chkVis.addEventListener('click', () => {
         const on = isChecked(chkVis);
@@ -1010,12 +1012,12 @@
         render();
       });
 
-      chkLoose.addEventListener('click', () => {
-        const on = isChecked(chkLoose);
-        setChecked(chkLoose, !on);
-        showLoose = !on;
-        LS.setShowLoose(!on);
-        refreshLoose();
+      chkEnds.addEventListener('click', () => {
+        const on = isChecked(chkEnds);
+        setChecked(chkEnds, !on);
+        showEnds = !on;
+        LS.setShowEnds(!on);
+        refreshEnds();
       });
 
       selRoadType.addEventListener('change', () => {
@@ -1111,9 +1113,9 @@
       // WME data only, so it runs with or without a cadastre load. Only right after a
       // data load does the view stand for what WME has loaded: an edit event can come
       // while WME is still fetching the area just panned to.
-      function refreshLoose(dataLoaded = false) {
-        if (!showLoose) {
-          looseNodes = [];
+      function refreshEnds(dataLoaded = false) {
+        if (!showEnds) {
+          listedEnds = [];
         } else {
           const segments = wmeSDK.DataModel.Segments.getAll();
           const nodes = wmeSDK.DataModel.Nodes.getAll();
@@ -1123,24 +1125,24 @@
             const [minLon, minLat, maxLon, maxLat] = mapBounds();
             spotLoaded = ([lon, lat]) => lon >= minLon && lon <= maxLon && lat >= minLat && lat <= maxLat;
           }
-          looseNodes = updateLooseList(looseNodes, looseEnds(segments, nodes, LOOSE_END_MAX_DISTANCE_M),
+          listedEnds = updateEndsList(listedEnds, findDisconnectedEnds(segments, nodes, DISCONNECTED_MAX_DISTANCE_M),
             segments, nodes, { allRoadTypes, spotLoaded });
         }
-        const n = looseNodes.length;
-        looseDiv.textContent = n ? `${n} disconnected ${n === 1 ? 'end, click it' : 'ends, click one'} to go there` : '';
-        looseList.innerHTML = looseNodes.map(e => `<div data-node="${e.nodeId}" style="cursor:pointer;text-decoration:underline;">`
+        const n = listedEnds.length;
+        endsDiv.textContent = n ? `${n} disconnected ${n === 1 ? 'end, click it' : 'ends, click one'} to go there` : '';
+        endsList.innerHTML = listedEnds.map(e => `<div data-node="${e.nodeId}" style="cursor:pointer;text-decoration:underline;">`
           + `${e.coords[1].toFixed(5)}, ${e.coords[0].toFixed(5)}</div>`).join('');
-        renderLoose();
+        renderEnds();
       }
 
-      looseList.addEventListener('click', (ev) => {
+      endsList.addEventListener('click', (ev) => {
         const row = ev.target?.closest?.('[data-node]');
-        const end = row && looseNodes.find(e => String(e.nodeId) === row.dataset.node);
+        const end = row && listedEnds.find(e => String(e.nodeId) === row.dataset.node);
         if (!end) return;
         try {
           wmeSDK.Map.setMapCenter({
             lonLat: { lon: end.coords[0], lat: end.coords[1] },
-            zoomLevel: Math.max(wmeSDK.Map.getZoomLevel(), LOOSE_JUMP_ZOOM)
+            zoomLevel: Math.max(wmeSDK.Map.getZoomLevel(), END_JUMP_ZOOM)
           });
         } catch (e) {
           console.warn('[SL-ROAD] could not centre the map:', e);
@@ -1150,7 +1152,7 @@
       wmeSDK.Events.on({
         eventName: 'wme-map-data-loaded',
         eventHandler: () => {
-          refreshLoose(true);
+          refreshEnds(true);
           if (!lines.size) return;
           refreshPieces();
           render();
@@ -1160,10 +1162,10 @@
 
       // Edits, including connecting a ringed end. WME fires these in bursts, one per
       // batch of objects, so the refresh waits for the burst to end.
-      let looseTimer = null;
-      const scheduleLoose = () => {
-        clearTimeout(looseTimer);
-        looseTimer = setTimeout(() => refreshLoose(), 100);
+      let endsTimer = null;
+      const scheduleEnds = () => {
+        clearTimeout(endsTimer);
+        endsTimer = setTimeout(() => refreshEnds(), 100);
       };
       wmeSDK.Events.trackDataModelEvents({ dataModelName: 'segments' });
       wmeSDK.Events.trackDataModelEvents({ dataModelName: 'nodes' });
@@ -1171,11 +1173,11 @@
         wmeSDK.Events.on({
           eventName,
           eventHandler: ({ dataModelName } = {}) => {
-            if (dataModelName === 'segments' || dataModelName === 'nodes') scheduleLoose();
+            if (dataModelName === 'segments' || dataModelName === 'nodes') scheduleEnds();
           }
         });
       }
-      refreshLoose();
+      refreshEnds();
 
       wmeSDK.Events.on({
         eventName: 'wme-layer-feature-mouse-enter',
@@ -1271,9 +1273,9 @@
         return sel && sel.objectType === 'segment' && sel.ids.length === 1 ? sel.ids[0] : null;
       }
 
-      // First press draws the snapped shape, a second press on the same, unchanged
+      // First press draws the aligned shape, a second press on the same, unchanged
       // segment applies it. Anything else starts over with a fresh preview.
-      function snapSelected() {
+      function alignSelected() {
         const segmentId = selectedSegmentId();
         const segment = segmentId == null ? null : wmeSDK.DataModel.Segments.getById({ segmentId });
         const coords = segment && segment.geometry && segment.geometry.coordinates;
@@ -1282,9 +1284,9 @@
           return;
         }
 
-        if (snapPreview && snapPreview.segmentId === segmentId
-          && JSON.stringify(snapPreview.original) === JSON.stringify(coords)) {
-          applySnap();
+        if (alignPreview && alignPreview.segmentId === segmentId
+          && JSON.stringify(alignPreview.original) === JSON.stringify(coords)) {
+          applyAlign();
           return;
         }
 
@@ -1292,36 +1294,36 @@
           toast('Load roads in view first', 'warning');
           return;
         }
-        const snapped = snapToCadastre(coords, [...lines.values()].map(l => l.coords),
-          COVERAGE_STEP_M, COVERAGE_MAX_DISTANCE_M, SNAP_END_SKIP_M, SIMPLIFY_TOLERANCE_M);
-        if (!snapped) {
-          snapPreview = null;
+        const aligned = alignToCadastre(coords, [...lines.values()].map(l => l.coords),
+          COVERAGE_STEP_M, COVERAGE_MAX_DISTANCE_M, ALIGN_END_SKIP_M, SIMPLIFY_TOLERANCE_M);
+        if (!aligned) {
+          alignPreview = null;
           render();
           toast('Couldn\'t match this segment to one loaded road, nothing to align it to', 'warning');
           return;
         }
-        snapPreview = {
+        alignPreview = {
           segmentId,
           original: coords.map(p => p.slice()),
-          coords: snapped,
+          coords: aligned,
           hasHouseNumbers: !!segment.hasHouseNumbers
         };
         render();
-        toast(`Preview in green: ${snapped.length - 2} geometry nodes. Press Align again to apply.`, 'info');
+        toast(`Preview in green: ${aligned.length - 2} geometry nodes. Press Align again to apply.`, 'info');
       }
 
-      function applySnap() {
-        const { segmentId, coords, hasHouseNumbers } = snapPreview;
+      function applyAlign() {
+        const { segmentId, coords, hasHouseNumbers } = alignPreview;
         if (!wmeSDK.Editing.isEditingAllowed()) {
           toast('Editing is not allowed here', 'warning');
           return;
         }
-        snapPreview = null;
+        alignPreview = null;
         render();
         try {
           wmeSDK.DataModel.Segments.updateSegment({ segmentId, geometry: { type: 'LineString', coordinates: coords } });
         } catch (e) {
-          console.error('[SL-ROAD] snapping failed:', e);
+          console.error('[SL-ROAD] aligning failed:', e);
           toast(`Could not align the segment: ${e.message || e}`, 'error');
           return;
         }
@@ -1332,25 +1334,27 @@
         }
       }
 
-      btnSnap.addEventListener('click', () => snapSelected());
+      btnAlign.addEventListener('click', () => alignSelected());
 
       wmeSDK.Events.on({
         eventName: 'wme-selection-changed',
         eventHandler: () => {
-          if (snapPreview && selectedSegmentId() !== snapPreview.segmentId) {
-            snapPreview = null;
+          if (alignPreview && selectedSegmentId() !== alignPreview.segmentId) {
+            alignPreview = null;
             render();
           }
         }
       });
 
+      // Align was called Snap once. Its shortcut id stays, or a key an editor rebound
+      // would be lost.
       ['qrsl-load', 'qrsl-clear', 'qrsl-snap'].forEach(id => {
         try { wmeSDK.Shortcuts.deleteShortcut({ shortcutId: id }); } catch (_) {}
       });
       [
         { shortcutId: 'qrsl-load',  shortcutKeys: 'AS+r', description: 'SL-ROAD: Load roads in view', callback: () => loadRoads() },
         { shortcutId: 'qrsl-clear', shortcutKeys: 'AS+x', description: 'SL-ROAD: Clear',              callback: () => clearRoads() },
-        { shortcutId: 'qrsl-snap',  shortcutKeys: 'AS+g', description: 'SL-ROAD: Align road geometry', callback: () => snapSelected() }
+        { shortcutId: 'qrsl-snap',  shortcutKeys: 'AS+g', description: 'SL-ROAD: Align road geometry', callback: () => alignSelected() }
       ].forEach(spec => {
         try { wmeSDK.Shortcuts.createShortcut(spec); }
         catch (e) { console.warn('[SL-ROAD] failed to register shortcut', spec.shortcutId, e); }
@@ -1437,10 +1441,10 @@
       simplifyLine,
       lineLengthM,
       prepareSegments,
-      missingStretches,
-      snapToCadastre,
-      looseEnds,
-      updateLooseList,
+      missingPieces,
+      alignToCadastre,
+      findDisconnectedEnds,
+      updateEndsList,
       buildItemsUrl,
       buildRoadLines,
       classifyFetchFailure,

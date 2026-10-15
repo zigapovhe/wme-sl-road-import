@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { missingStretches, prepareSegments } = require('../wme-sl-road-import.user.js');
+const { missingPieces, prepareSegments } = require('../wme-sl-road-import.user.js');
 
 const LON0 = 14.5;
 const LAT0 = 46;
@@ -21,7 +21,7 @@ const MIN = 30;
 const line = [at(0, 0), at(200, 0)];
 
 const missing = (coords, segmentLines) =>
-  missingStretches(coords, prepareSegments(segmentLines), STEP, MAX, MIN);
+  missingPieces(coords, prepareSegments(segmentLines), STEP, MAX, MIN);
 
 function assertLine(actual, expected) {
   assert.strictEqual(actual.length, expected.length, `got ${JSON.stringify(actual)}`);
@@ -139,5 +139,5 @@ test('a far segment is rejected on its cached box alone', () => {
   // cadastre line made that a visible freeze in a city view.
   const [far] = prepareSegments([[at(5000, 5000), at(5200, 5000)]]);
   const untouchable = new Proxy([], { get: () => { throw new Error('coordinates were read'); } });
-  assert.deepStrictEqual(missingStretches(line, [{ ...far, coords: untouchable }], STEP, MAX, MIN), [line]);
+  assert.deepStrictEqual(missingPieces(line, [{ ...far, coords: untouchable }], STEP, MAX, MIN), [line]);
 });
