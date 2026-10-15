@@ -54,15 +54,21 @@
   // Close enough to drag a node onto a road.
   const END_JUMP_ZOOM = 18;
 
-  const LS = {
-    getLayerVisible() { return localStorage.getItem('qrsl-layer-visible') !== '0'; }, // default on
-    setLayerVisible(v){ localStorage.setItem('qrsl-layer-visible', v ? '1' : '0'); },
-    getShowMapped()   { return localStorage.getItem('qrsl-show-mapped') === '1'; },
-    setShowMapped(v)  { localStorage.setItem('qrsl-show-mapped', v ? '1' : '0'); },
+  // An on/off setting kept in localStorage. Only a stored '0' turns a default-on
+  // setting off, and only '1' turns a default-off one on.
+  function setting(key, byDefault) {
+    return {
+      get: () => (byDefault ? localStorage.getItem(key) !== '0' : localStorage.getItem(key) === '1'),
+      set: (on) => localStorage.setItem(key, on ? '1' : '0')
+    };
+  }
+
+  const SETTINGS = {
+    showLayer:  setting('qrsl-layer-visible', true),
+    showMapped: setting('qrsl-show-mapped', false),
     // Disconnected ends were called loose ends once. The key stays, or the saved
     // setting would be lost.
-    getShowEnds()     { return localStorage.getItem('qrsl-show-loose') !== '0'; },  // default on
-    setShowEnds(v)    { localStorage.setItem('qrsl-show-loose', v ? '1' : '0'); }
+    showEnds:   setting('qrsl-show-loose', true)
   };
 
   const INSTRUCTIONS_HTML = `<b>Instructions</b><br/>
@@ -80,6 +86,8 @@
     error:   { bg: '#f8d7da', border: '#dc3545', text: '#721c24' }
   };
   const TOAST_TIMEOUT_MS = 4000;
+
+  // --- Page helpers ---
 
   // Plain DOM because the SDK has no notifications API.
   let toastHost = null;
@@ -119,6 +127,19 @@
   // wz-checkbox keeps its state in an attribute, not a .checked property.
   const isChecked  = (el) => el?.hasAttribute('checked');
   const setChecked = (el, v) => v ? el.setAttribute('checked', '') : el.removeAttribute('checked');
+
+  // Shows a setting on a checkbox. A click flips both and passes the new state on.
+  function bindCheckbox(el, setting, onChange) {
+    setChecked(el, setting.get());
+    el.addEventListener('click', () => {
+      const on = !isChecked(el);
+      setChecked(el, on);
+      setting.set(on);
+      onChange(on);
+    });
+  }
+
+  // --- Road types and cadastre categories ---
 
   // Waze road type ids, from the SDK's ROAD_TYPE constant. Literals, because the
   // constant is a module export in the SDK typings, not something on the instance.
@@ -183,6 +204,8 @@
     return `${categoryInfo(line.category).name} → ${roadTypeName(roadType)}`
       + `${unpaved ? ', unpaved' : ''}, ${Math.round(line.lengthM)} m`;
   }
+
+  // --- Geometry, in local metres ---
 
   // Metres per degree for a local flat projection. Plenty for the few km a cadastre
   // line spans. It only feeds simplification and coverage; WME gets plain lon/lat.
@@ -312,14 +335,6 @@
       && b.maxLat >= a.minLat - padLat && b.minLat <= a.maxLat + padLat;
   }
 
-  // WME segment geometries with their boxes, computed once per refresh rather than
-  // once per cadastre line: the refresh runs on every pan.
-  function prepareSegments(segmentLines) {
-    return segmentLines
-      .filter(seg => Array.isArray(seg) && seg.length >= 2)
-      .map(coords => ({ coords, box: bboxOf(coords) }));
-  }
-
   // Index i of the edge (i-1 -> i) holding the point dM metres along, cum being the
   // cumulative vertex distances.
   function edgeAt(cum, dM) {
@@ -357,10 +372,6 @@
   const ALONGSIDE_MAX_ANGLE_DEG = 45;
   const ALONGSIDE_MIN_COS2 = Math.cos(ALONGSIDE_MAX_ANGLE_DEG * Math.PI / 180) ** 2;
 
-  // Aligning needs the cadastre alongside at least this share of the segment's samples.
-  // Less, and the line matching at both ends is probably a different road between them.
-  const ALIGN_MIN_MATCHED = 0.5;
-
   // Whether direction u and the edge a-b are within ALONGSIDE_MAX_ANGLE_DEG of each
   // other, either way round.
   function isAlongside(u, [ax, ay], [bx, by]) {
@@ -369,6 +380,16 @@
     const vv = vx * vx + vy * vy;
     const dot = u[0] * vx + u[1] * vy;
     return vv > 0 && dot * dot >= ALONGSIDE_MIN_COS2 * (u[0] * u[0] + u[1] * u[1]) * vv;
+  }
+
+  // --- Missing pieces: cadastre roads with no WME road along them ---
+
+  // WME segment geometries with their boxes, computed once per refresh rather than
+  // once per cadastre line: the refresh runs on every pan.
+  function prepareSegments(segmentLines) {
+    return segmentLines
+      .filter(seg => Array.isArray(seg) && seg.length >= 2)
+      .map(coords => ({ coords, box: bboxOf(coords) }));
   }
 
   // The pieces of a cadastre line with no WME road running alongside it within
@@ -416,6 +437,8 @@
     }
     return pieces;
   }
+
+  // --- Disconnected ends ---
 
   // Ferries, railways and runways are never joined to roads, so a road ending next to
   // one is fine.
@@ -476,6 +499,12 @@
     const keptIds = new Set(kept.map(e => e.nodeId));
     return kept.concat(found.filter(e => !keptIds.has(e.nodeId)));
   }
+
+  // --- Aligning a WME segment onto the cadastre ---
+
+  // Aligning needs the cadastre alongside at least this share of the segment's samples.
+  // Less, and the line matching at both ends is probably a different road between them.
+  const ALIGN_MIN_MATCHED = 0.5;
 
   // The vertices of a projected cadastre line between two positions along it, in the
   // order of travel from one to the other. The vertex at fromM itself only when asked.
@@ -605,6 +634,8 @@
     const deduped = out.filter((p, k) => k === 0 || p[0] !== out[k - 1][0] || p[1] !== out[k - 1][1]);
     return simplifyLine(deduped, toleranceM);
   }
+
+  // --- Loading from eProstor ---
 
   function buildItemsUrl(bbox, startIndex) {
     return CADASTRE_API
@@ -745,6 +776,8 @@
     }
   }
 
+  // --- WME: the layers, the sidebar and one setup function per feature ---
+
   // Grey and cyan lines lie exactly on WME segments: the one just created, or a road
   // WME already has. They let the mouse through, or they would catch the drags and
   // clicks meant for those segments and their nodes.
@@ -821,7 +854,7 @@
 
   function selectedSegmentId() {
     const sel = wmeSDK.Editing.getSelection();
-    return sel && sel.objectType === 'segment' && sel.ids.length === 1 ? sel.ids[0] : null;
+    return sel?.objectType === 'segment' && sel.ids.length === 1 ? sel.ids[0] : null;
   }
 
   // The empty street with no city, in the country WME is centred on.
@@ -895,9 +928,9 @@
       partial: false,            // the last load hit the page cap or lost pages
       update, render, clear, show
     };
-    let layerWanted = LS.getLayerVisible();
+    let layerWanted = SETTINGS.showLayer.get();
     let layerShown = false;
-    let showMapped = LS.getShowMapped();
+    let showMapped = SETTINGS.showMapped.get();
     let layerIds = [];
 
     function updateLayerVisibility() {
@@ -918,7 +951,7 @@
     // before WME lists that segment.
     function refreshPieces() {
       const segments = prepareSegments(wmeSDK.DataModel.Segments.getAll()
-        .map(s => s.geometry && s.geometry.coordinates)
+        .map(s => s.geometry?.coordinates)
         .concat([...imported.values()].map(a => a.coords)));
       pieces.clear();
       for (const line of lines.values()) {
@@ -981,27 +1014,17 @@
       if (!layerWanted) {
         layerWanted = true;
         setChecked(ui.chkVis, true);
-        LS.setLayerVisible(true);
+        SETTINGS.showLayer.set(true);
       }
       updateLayerVisibility();
     }
 
-    setChecked(ui.chkVis, layerWanted);
-    setChecked(ui.chkMapped, showMapped);
-
-    ui.chkVis.addEventListener('click', () => {
-      const on = isChecked(ui.chkVis);
-      setChecked(ui.chkVis, !on);
-      layerWanted = !on;
-      LS.setLayerVisible(!on);
+    bindCheckbox(ui.chkVis, SETTINGS.showLayer, (on) => {
+      layerWanted = on;
       updateLayerVisibility();
     });
-
-    ui.chkMapped.addEventListener('click', () => {
-      const on = isChecked(ui.chkMapped);
-      setChecked(ui.chkMapped, !on);
-      showMapped = !on;
-      LS.setShowMapped(!on);
+    bindCheckbox(ui.chkMapped, SETTINGS.showMapped, (on) => {
+      showMapped = on;
       render();
     });
 
@@ -1177,7 +1200,7 @@
     function alignSelected() {
       const segmentId = selectedSegmentId();
       const segment = segmentId == null ? null : wmeSDK.DataModel.Segments.getById({ segmentId });
-      const coords = segment && segment.geometry && segment.geometry.coordinates;
+      const coords = segment?.geometry?.coordinates;
       if (!coords) {
         toast('Select one road segment to align', 'warning');
         return;
@@ -1253,7 +1276,7 @@
   // sidebar. WME data only, so it runs with or without a cadastre load. Its own layer,
   // so the ends show at every zoom and with the roads hidden.
   function setupDisconnectedEnds(ui) {
-    let showEnds = LS.getShowEnds();
+    let showEnds = SETTINGS.showEnds.get();
     let listedEnds = [];         // this session's, kept as updateEndsList describes
     let endIds = [];
 
@@ -1289,13 +1312,8 @@
       renderEnds();
     }
 
-    setChecked(ui.chkEnds, showEnds);
-
-    ui.chkEnds.addEventListener('click', () => {
-      const on = isChecked(ui.chkEnds);
-      setChecked(ui.chkEnds, !on);
-      showEnds = !on;
-      LS.setShowEnds(!on);
+    bindCheckbox(ui.chkEnds, SETTINGS.showEnds, (on) => {
+      showEnds = on;
       refreshEnds();
     });
 
@@ -1336,6 +1354,8 @@
     refreshEnds();
   }
 
+  // --- Startup ---
+
   function init() {
     try {
       I18n.translations[I18n.currentLocale()].layers.name[SCRIPT_ID] = 'Quick Road Importer';
@@ -1373,69 +1393,75 @@
     });
   }
 
+  // Checked against the SDK docs at v2.374 on 2026-10-14. getWmeSdk is called without
+  // a `version`, so WME always hands this script the latest SDK, and these lists catch
+  // a renamed method before it fails silently. A test checks they name every SDK call
+  // in this file.
+  const REQUIRED_SDK_APIS = [
+    'DataModel.Segments.getAll',
+    'DataModel.Segments.getById',
+    'DataModel.Segments.addSegment',
+    'DataModel.Segments.updateSegment',
+    'DataModel.Segments.updateAddress',
+    'DataModel.Nodes.getAll',
+    'DataModel.Countries.getTopCountry',
+    'DataModel.Cities.getCity',
+    'DataModel.Cities.addCity',
+    'DataModel.Streets.getStreet',
+    'DataModel.Streets.addStreet',
+    'Editing.setSelection',
+    'Editing.getSelection',
+    'Editing.isEditingAllowed',
+    'Events.on',
+    'Events.once',
+    'Events.trackLayerEvents',
+    'Events.trackDataModelEvents',
+    'Sidebar.registerScriptTab',
+    'Map.addLayer',
+    'Map.addFeaturesToLayer',
+    'Map.removeFeaturesFromLayer',
+    'Map.setLayerVisibility',
+    'Map.getZoomLevel',
+    'Map.getMapExtent'
+  ];
+  const OPTIONAL_SDK_APIS = [
+    'Shortcuts.createShortcut',
+    'Shortcuts.deleteShortcut',
+    'Map.setMapCenter'             // the list of disconnected ends can't take you there
+  ];
+
+  // False, after saying why, when the SDK lacks an API the script can't run without.
+  function sdkHasRequiredApis() {
+    const isMissing = (path) => {
+      let cur = wmeSDK;
+      for (const p of path.split('.')) { cur = cur?.[p]; if (cur == null) return true; }
+      return false;
+    };
+
+    const missing = REQUIRED_SDK_APIS.filter(isMissing);
+    if (missing.length) {
+      console.error('[SL-ROAD] WME SDK missing required APIs:', missing);
+      toast(`SL-ROAD: WME SDK is missing ${missing.length} required APIs. See console.`, 'error');
+      return false;
+    }
+
+    const missingOptional = OPTIONAL_SDK_APIS.filter(isMissing);
+    if (missingOptional.length) {
+      console.warn('[SL-ROAD] WME SDK missing optional APIs (features degraded):', missingOptional);
+    }
+    return true;
+  }
+
   // The single entry point, and the one thing the test suite skips.
   if (IN_USERSCRIPT_ENV) {
-  (unsafeWindow || window).SDK_INITIALIZED.then(() => {
-    wmeSDK = getWmeSdk({ scriptId: SCRIPT_ID, scriptName: 'Quick Road Importer (SI)' });
-    wmeSDK.Events.once({ eventName: 'wme-ready' }).then(() => {
-      // Checked against the SDK docs at v2.374 on 2026-10-14. getWmeSdk is called
-      // without a `version`, so WME always hands this script the latest SDK, and these
-      // lists catch a renamed method before it fails silently. A test checks they name
-      // every SDK call in this file. Anything in `required` aborts startup.
-      const required = [
-        'DataModel.Segments.getAll',
-        'DataModel.Segments.getById',
-        'DataModel.Segments.addSegment',
-        'DataModel.Segments.updateSegment',
-        'DataModel.Segments.updateAddress',
-        'DataModel.Nodes.getAll',
-        'DataModel.Countries.getTopCountry',
-        'DataModel.Cities.getCity',
-        'DataModel.Cities.addCity',
-        'DataModel.Streets.getStreet',
-        'DataModel.Streets.addStreet',
-        'Editing.setSelection',
-        'Editing.getSelection',
-        'Editing.isEditingAllowed',
-        'Events.on',
-        'Events.once',
-        'Events.trackLayerEvents',
-        'Events.trackDataModelEvents',
-        'Sidebar.registerScriptTab',
-        'Map.addLayer',
-        'Map.addFeaturesToLayer',
-        'Map.removeFeaturesFromLayer',
-        'Map.setLayerVisibility',
-        'Map.getZoomLevel',
-        'Map.getMapExtent'
-      ];
-      const optional = [
-        'Shortcuts.createShortcut',
-        'Shortcuts.deleteShortcut',
-        'Map.setMapCenter'             // the list of disconnected ends can't take you there
-      ];
-
-      const isMissing = (path) => {
-        let cur = wmeSDK;
-        for (const p of path.split('.')) { cur = cur?.[p]; if (cur == null) return true; }
-        return false;
-      };
-
-      const missing = required.filter(isMissing);
-      if (missing.length) {
-        console.error('[SL-ROAD] WME SDK missing required APIs:', missing);
-        toast(`SL-ROAD: WME SDK is missing ${missing.length} required APIs. See console.`, 'error');
-        return;
-      }
-
-      const missingOptional = optional.filter(isMissing);
-      if (missingOptional.length) {
-        console.warn('[SL-ROAD] WME SDK missing optional APIs (features degraded):', missingOptional);
-      }
-
-      init();
-    });
-  });
+    (unsafeWindow || window).SDK_INITIALIZED
+      .then(() => {
+        wmeSDK = getWmeSdk({ scriptId: SCRIPT_ID, scriptName: 'Quick Road Importer (SI)' });
+        return wmeSDK.Events.once({ eventName: 'wme-ready' });
+      })
+      .then(() => {
+        if (sdkHasRequiredApis()) init();
+      });
   }
 
   // Test-only surface. `module` does not exist in Tampermonkey, so this is a no-op

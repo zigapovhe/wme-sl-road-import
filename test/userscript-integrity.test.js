@@ -80,6 +80,6 @@ test('the SDK check lists exactly the SDK calls the script makes', () => {
   // nothing calls can block startup for no reason.
   const called = new Set([...source.matchAll(/wmeSDK\.([A-Za-z.]+)\(/g)].map(m => m[1]));
   const list = (name) => source.match(new RegExp(`const ${name} = \\[([^\\]]*)\\]`))[1];
-  const listed = new Set([...(list('required') + list('optional')).matchAll(/'([A-Za-z.]+)'/g)].map(m => m[1]));
+  const listed = new Set([...(list('REQUIRED_SDK_APIS') + list('OPTIONAL_SDK_APIS')).matchAll(/'([A-Za-z.]+)'/g)].map(m => m[1]));
   assert.deepStrictEqual([...called].sort(), [...listed].sort());
 });
