@@ -948,7 +948,7 @@
             <button id="qrsl-clear" class="wz-button wz-button--secondary">Clear <kbd style="${KBD_STYLE}">Alt+Shift+X</kbd></button>
           </div>
           <div style="margin:0 0 8px 0;">
-            <button id="qrsl-snap" class="wz-button wz-button--secondary">Snap selected road to cadastre <kbd style="${KBD_STYLE}">Alt+Shift+G</kbd></button>
+            <button id="qrsl-snap" class="wz-button wz-button--secondary">Align road geometry <kbd style="${KBD_STYLE}">Alt+Shift+G</kbd></button>
           </div>
           <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
             <wz-checkbox id="qrsl-toggle">Show layer</wz-checkbox>
@@ -1264,7 +1264,7 @@
         const segment = segmentId == null ? null : wmeSDK.DataModel.Segments.getById({ segmentId });
         const coords = segment && segment.geometry && segment.geometry.coordinates;
         if (!coords) {
-          toast('Select one road segment to snap', 'warning');
+          toast('Select one road segment to align', 'warning');
           return;
         }
 
@@ -1283,7 +1283,7 @@
         if (!snapped) {
           snapPreview = null;
           render();
-          toast('Couldn\'t match this segment to one cadastre road, nothing to snap to', 'warning');
+          toast('Couldn\'t match this segment to one loaded road, nothing to align it to', 'warning');
           return;
         }
         snapPreview = {
@@ -1293,7 +1293,7 @@
           hasHouseNumbers: !!segment.hasHouseNumbers
         };
         render();
-        toast(`Preview in green: ${snapped.length - 2} geometry nodes. Press Snap again to apply.`, 'info');
+        toast(`Preview in green: ${snapped.length - 2} geometry nodes. Press Align again to apply.`, 'info');
       }
 
       function applySnap() {
@@ -1308,13 +1308,13 @@
           wmeSDK.DataModel.Segments.updateSegment({ segmentId, geometry: { type: 'LineString', coordinates: coords } });
         } catch (e) {
           console.error('[SL-ROAD] snapping failed:', e);
-          toast(`Could not snap the segment: ${e.message || e}`, 'error');
+          toast(`Could not align the segment: ${e.message || e}`, 'error');
           return;
         }
         if (hasHouseNumbers) {
-          toast(`Snapped, ${coords.length - 2} geometry nodes. It has house numbers, check them.`, 'warning');
+          toast(`Aligned, ${coords.length - 2} geometry nodes. It has house numbers, check them.`, 'warning');
         } else {
-          toast(`Snapped, ${coords.length - 2} geometry nodes`, 'success');
+          toast(`Aligned, ${coords.length - 2} geometry nodes`, 'success');
         }
       }
 
@@ -1336,7 +1336,7 @@
       [
         { shortcutId: 'qrsl-load',  shortcutKeys: 'AS+r', description: 'SL-ROAD: Load roads in view', callback: () => loadRoads() },
         { shortcutId: 'qrsl-clear', shortcutKeys: 'AS+x', description: 'SL-ROAD: Clear',              callback: () => clearRoads() },
-        { shortcutId: 'qrsl-snap',  shortcutKeys: 'AS+g', description: 'SL-ROAD: Snap selected road to cadastre', callback: () => snapSelected() }
+        { shortcutId: 'qrsl-snap',  shortcutKeys: 'AS+g', description: 'SL-ROAD: Align road geometry', callback: () => snapSelected() }
       ].forEach(spec => {
         try { wmeSDK.Shortcuts.createShortcut(spec); }
         catch (e) { console.warn('[SL-ROAD] failed to register shortcut', spec.shortcutId, e); }

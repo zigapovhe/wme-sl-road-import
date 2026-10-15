@@ -41,11 +41,11 @@ Only the parts of a cadastre road with no WME road running alongside them (withi
 
 This only sees what WME has loaded, which is why loading needs zoom 16. When WME loads more map data, the check runs again.
 
-## Snapping an existing road
+## Aligning an existing road
 
-To move an existing WME road onto the cadastre geometry, select one segment and click **Snap selected road to cadastre** (or press `Alt+Shift+G`). The new shape is drawn as a green dashed preview. Press again to apply it, or select something else to drop it.
+To move an existing WME road onto the cadastre geometry, select one segment and click **Align road geometry** (or press `Alt+Shift+G`). The new shape is drawn as a green dashed preview. Press again to apply it, or select something else to drop it.
 
-The segment's two end nodes never move, so its connections stay as they are. Only the points in between are replaced with the cadastre's, bends included. It works across cadastre junctions and whichever way the cadastre is drawn. Where WME drew a bend far off, the cadastre's own shape fills the gap. Nothing is snapped if the cadastre runs alongside less than half of the segment, misses its first or last 15 m, or would jump between cadastre roads that don't meet. If the segment has house numbers, check them afterwards. WME's undo reverts a snap.
+The segment's two end nodes never move, so its connections stay as they are. Only the points in between are replaced with the cadastre's, bends included. It works across cadastre junctions and whichever way the cadastre is drawn. Where WME drew a bend far off, the cadastre's own shape fills the gap. Nothing changes if the cadastre runs alongside less than half of the segment, misses its first or last 15 m, or would jump between cadastre roads that don't meet. If the segment has house numbers, check them afterwards. WME's undo reverts it.
 
 ## Disconnected ends
 
@@ -66,7 +66,7 @@ The sidebar lists every end found this session by its coordinates. Click one and
 |----------|--------|
 | `Alt+Shift+R` | Load roads in view |
 | `Alt+Shift+X` | Clear |
-| `Alt+Shift+G` | Snap selected road to cadastre (press twice: preview, then apply) |
+| `Alt+Shift+G` | Align road geometry (press twice: preview, then apply) |
 
 You can reassign them in WME's keyboard shortcuts dialog.
 
