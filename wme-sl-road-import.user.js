@@ -36,9 +36,9 @@
   // Same retry policy as the HN importer: eProstor times out at random, and the
   // per-load budget bounds how long a sick server can keep a load spinning.
   const FETCH_TIMEOUT_MS = 30000;
-  const FETCH_PAGE_RETRIES = 2;                 // 3 attempts per page
+  const FETCH_PAGE_RETRIES = 2; // 3 attempts per page
   const FETCH_RETRY_BACKOFF_MS = [1000, 3000];
-  const FETCH_RETRY_BUDGET = 4;                 // retries per load, across all pages
+  const FETCH_RETRY_BUDGET = 4; // retries per load, across all pages
 
   // Coverage only sees segments WME has loaded, so loading below this zoom would
   // show roads WME has but hasn't fetched.
@@ -127,7 +127,7 @@
   const IN_USERSCRIPT_ENV = typeof unsafeWindow !== 'undefined' || typeof window !== 'undefined';
 
   // wz-checkbox keeps its state in an attribute, not a .checked property.
-  const isChecked  = (el) => el?.hasAttribute('checked');
+  const isChecked = (el) => el?.hasAttribute('checked');
   const setChecked = (el, v) => v ? el.setAttribute('checked', '') : el.removeAttribute('checked');
 
   // Shows a setting on a checkbox. A click flips both and passes the new state on.
@@ -147,12 +147,12 @@
   // constant is a module export in the SDK typings, not something on the instance.
   // Also the order of the road type dropdown.
   const ROAD_TYPES = [
-    { id: 3,  name: 'Freeway' },
-    { id: 6,  name: 'Major Highway' },
-    { id: 7,  name: 'Minor Highway' },
-    { id: 2,  name: 'Primary Street' },
-    { id: 1,  name: 'Street' },
-    { id: 8,  name: 'Off-road / Not maintained' },
+    { id: 3, name: 'Freeway' },
+    { id: 6, name: 'Major Highway' },
+    { id: 7, name: 'Minor Highway' },
+    { id: 2, name: 'Primary Street' },
+    { id: 1, name: 'Street' },
+    { id: 8, name: 'Off-road / Not maintained' },
     { id: 17, name: 'Private Road' },
     { id: 20, name: 'Parking Lot Road' }
   ];
@@ -160,26 +160,26 @@
   // GJI_ATR1_SIFRA from the cadastre, with its own GJI_ATR1_NAZIV_SL name. Code 15
   // does not exist. Cycle paths, hiking trails and footpaths are never offered.
   const ROAD_CATEGORIES = {
-    0:  { name: 'ni podatka',                       roadType: 1 },
-    1:  { name: 'avtocesta',                        roadType: 3 },
-    2:  { name: 'hitra cesta',                      roadType: 7 },
-    3:  { name: 'glavna cesta I. reda',             roadType: 2 },
-    4:  { name: 'glavna cesta II. reda',            roadType: 2 },
-    5:  { name: 'regionalna cesta I. reda',         roadType: 2 },
-    6:  { name: 'regionalna cesta II. reda',        roadType: 2 },
-    7:  { name: 'regionalna cesta III. reda',       roadType: 2 },
-    8:  { name: 'turistična cesta',                 roadType: 2 },
-    9:  { name: 'lokalna cesta',                    roadType: 1 },
-    10: { name: 'javna pot',                        roadType: 1 },
-    11: { name: 'glavna mestna cesta',              roadType: 2 },
+    0:  { name: 'ni podatka', roadType: 1 },
+    1:  { name: 'avtocesta', roadType: 3 },
+    2:  { name: 'hitra cesta', roadType: 7 },
+    3:  { name: 'glavna cesta I. reda', roadType: 2 },
+    4:  { name: 'glavna cesta II. reda', roadType: 2 },
+    5:  { name: 'regionalna cesta I. reda', roadType: 2 },
+    6:  { name: 'regionalna cesta II. reda', roadType: 2 },
+    7:  { name: 'regionalna cesta III. reda', roadType: 2 },
+    8:  { name: 'turistična cesta', roadType: 2 },
+    9:  { name: 'lokalna cesta', roadType: 1 },
+    10: { name: 'javna pot', roadType: 1 },
+    11: { name: 'glavna mestna cesta', roadType: 2 },
     12: { name: 'zbirna mestna ali krajevna cesta', roadType: 2 },
-    13: { name: 'mestna ali krajevna cesta',        roadType: 1 },
-    14: { name: 'državna kolesarska pot',           excluded: true },
-    16: { name: 'občinska kolesarska pot',          excluded: true },
-    17: { name: 'gozdna cesta',                     roadType: 8, unpaved: true },
-    18: { name: 'nekategorizirana cesta',           roadType: 17 },
-    19: { name: 'planinska pot',                    excluded: true },
-    20: { name: 'pešpoti',                          excluded: true }
+    13: { name: 'mestna ali krajevna cesta', roadType: 1 },
+    14: { name: 'državna kolesarska pot', excluded: true },
+    16: { name: 'občinska kolesarska pot', excluded: true },
+    17: { name: 'gozdna cesta', roadType: 8, unpaved: true },
+    18: { name: 'nekategorizirana cesta', roadType: 17 },
+    19: { name: 'planinska pot', excluded: true },
+    20: { name: 'pešpoti', excluded: true }
   };
 
   function roadTypeName(id) {
@@ -921,13 +921,13 @@
   // Loading, adding and aligning change what is in the returned object, then call
   // update() or render() to show it.
   function setupRoadLayer(ui) {
-    const lines = new Map();     // id -> RoadLine, for the current load
-    const pieces = new Map();    // id -> the part of a line WME has no road along
-    const imported = new Map();  // id -> { lineId, coords } of segments added since the last load
+    const lines = new Map(); // id -> RoadLine, for the current load
+    const pieces = new Map(); // id -> the part of a line WME has no road along
+    const imported = new Map(); // id -> { lineId, coords } of segments added since the last load
     const roads = {
       lines, pieces, imported,
-      alignPreview: null,        // { segmentId, original, coords, hasHouseNumbers } awaiting a second press
-      partial: false,            // the last load hit the page cap or lost pages
+      alignPreview: null, // { segmentId, original, coords, hasHouseNumbers } awaiting a second press
+      partial: false, // the last load hit the page cap or lost pages
       update, render, clear, show
     };
     let layerWanted = SETTINGS.showLayer.get();
@@ -1279,7 +1279,7 @@
   // so the ends show at every zoom and with the roads hidden.
   function setupDisconnectedEnds(ui) {
     let showEnds = SETTINGS.showEnds.get();
-    let listedEnds = [];         // this session's, kept as updateEndsList describes
+    let listedEnds = []; // this session's, kept as updateEndsList describes
     let endIds = [];
 
     function renderEnds() {
@@ -1385,9 +1385,9 @@
         try { wmeSDK.Shortcuts.deleteShortcut({ shortcutId: id }); } catch (_) {}
       });
       [
-        { shortcutId: 'qrsl-load',  shortcutKeys: 'AS+r', description: 'SL-ROAD: Load roads in view', callback: () => loadRoads() },
-        { shortcutId: 'qrsl-clear', shortcutKeys: 'AS+x', description: 'SL-ROAD: Clear',              callback: () => clearRoads() },
-        { shortcutId: 'qrsl-snap',  shortcutKeys: 'AS+g', description: 'SL-ROAD: Align road geometry', callback: () => alignSelected() }
+        { shortcutId: 'qrsl-load', shortcutKeys: 'AS+r', description: 'SL-ROAD: Load roads in view', callback: () => loadRoads() },
+        { shortcutId: 'qrsl-clear', shortcutKeys: 'AS+x', description: 'SL-ROAD: Clear', callback: () => clearRoads() },
+        { shortcutId: 'qrsl-snap', shortcutKeys: 'AS+g', description: 'SL-ROAD: Align road geometry', callback: () => alignSelected() }
       ].forEach(spec => {
         try { wmeSDK.Shortcuts.createShortcut(spec); }
         catch (e) { console.warn('[SL-ROAD] failed to register shortcut', spec.shortcutId, e); }
@@ -1429,7 +1429,7 @@
   const OPTIONAL_SDK_APIS = [
     'Shortcuts.createShortcut',
     'Shortcuts.deleteShortcut',
-    'Map.setMapCenter'             // the list of disconnected ends can't take you there
+    'Map.setMapCenter' // the list of disconnected ends can't take you there
   ];
 
   // False, after saying why, when the SDK lacks an API the script can't run without.
