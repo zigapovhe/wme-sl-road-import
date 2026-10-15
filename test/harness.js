@@ -16,6 +16,7 @@ const path = require('node:path');
 
 const SCRIPT_PATH = path.join(__dirname, '..', 'wme-sl-road-import.user.js');
 const LAYER = 'qrsl-roads';
+const LOOSE_LAYER = 'qrsl-loose';
 
 const FOREST_ID = '300200000000000017-0/0'; // line 300200000000000017-0, first missing piece
 const FOREST_COORDS = [[14.55, 46.05], [14.551, 46.05], [14.551, 46.051]];
@@ -37,7 +38,8 @@ const DEFAULT_CADASTRE = { type: 'FeatureCollection', features: [FOREST, TRAIL],
 // whileStubbed: run after boot and before the stubs come down. Anything that calls
 // back into the script goes here.
 // options, read at call time so a test may change them mid-run:
-//   zoom (default 17), wmeSegments (what Segments.getAll returns), wmeNodes (Nodes.getAll),
+//   zoom (default 17), extent (what Map.getMapExtent returns),
+//   wmeSegments (what Segments.getAll returns), wmeNodes (Nodes.getAll),
 //   editingAllowed (default true), addSegmentThrows, updateAddressThrows,
 //   selection (what Editing.getSelection returns), segments (id -> segment for getById),
 //   cadastre: the FeatureCollection every request returns, or 'reject' for an HTTP 400.
@@ -49,20 +51,31 @@ async function bootScript(storage = {}, whileStubbed = null, options = {}) {
   const domHandlers = [];
   const handlers = new Map();
 
-  const element = () => new Proxy(function () {}, {
-    get: (t, k) => {
-      if (k === 'style') return {};
-      if (k === 'classList') return { add() {}, remove() {}, toggle() {} };
-      if (k === 'querySelector' || k === 'closest') return () => element();
-      if (k === 'querySelectorAll') return () => [];
-      if (k === 'hasAttribute') return () => false;
-      if (k === 'addEventListener') return (type, handler) => domHandlers.push({ type, handler });
-      if (k === 'innerHTML' || k === 'textContent' || k === 'value') return '';
-      return element();
-    },
-    set: () => true,
-    apply: () => element()
-  });
+  // querySelector hands out one element per selector, which keeps what the script
+  // sets on it, and click handlers remember the selector they were added under.
+  const bySelector = new Map();
+  const element = (selector = null) => {
+    const props = {};
+    return new Proxy(function () {}, {
+      get: (t, k) => {
+        if (k in props) return props[k];
+        if (k === 'style') return {};
+        if (k === 'classList') return { add() {}, remove() {}, toggle() {} };
+        if (k === 'querySelector') return (sel) => {
+          if (!bySelector.has(sel)) bySelector.set(sel, element(sel));
+          return bySelector.get(sel);
+        };
+        if (k === 'closest') return () => element();
+        if (k === 'querySelectorAll') return () => [];
+        if (k === 'hasAttribute') return () => false;
+        if (k === 'addEventListener') return (type, handler) => domHandlers.push({ type, handler, selector });
+        if (k === 'innerHTML' || k === 'textContent' || k === 'value') return '';
+        return element();
+      },
+      set: (t, k, v) => { props[k] = v; return true; },
+      apply: () => element()
+    });
+  };
 
   function handleSdkCall(name, arg) {
     calls.push({ name, arg });
@@ -86,7 +99,7 @@ async function bootScript(storage = {}, whileStubbed = null, options = {}) {
         if (layers.has(arg.layerName)) layers.get(arg.layerName).features = [];
         return undefined;
       case 'Map.getZoomLevel': return options.zoom ?? 17;
-      case 'Map.getMapExtent': return [14.5, 46.0, 14.6, 46.1];
+      case 'Map.getMapExtent': return options.extent ?? [14.5, 46.0, 14.6, 46.1];
       case 'Events.once': return Promise.resolve();
       case 'Sidebar.registerScriptTab':
         return Promise.resolve({ tabLabel: element(), tabPane: element() });
@@ -153,7 +166,8 @@ async function bootScript(storage = {}, whileStubbed = null, options = {}) {
     new Function('module', fs.readFileSync(SCRIPT_PATH, 'utf8'))({});
     await new Promise(resolve => setTimeout(resolve, 50));
     if (whileStubbed) {
-      await whileStubbed({ calls, layers, handlers, domHandlers, requests, options });
+      const dom = (selector) => bySelector.get(selector);
+      await whileStubbed({ calls, layers, handlers, domHandlers, requests, options, dom });
       await new Promise(resolve => setTimeout(resolve, 100));
     }
   } finally {
@@ -189,5 +203,5 @@ const features = (ctx) => ctx.layers.get(LAYER).features;
 
 module.exports = {
   bootScript, waitFor, fire, argsOf, shortcut, load, features,
-  LAYER, FOREST, FOREST_ID, FOREST_COORDS, DEFAULT_CADASTRE
+  LAYER, LOOSE_LAYER, FOREST, FOREST_ID, FOREST_COORDS, DEFAULT_CADASTRE
 };

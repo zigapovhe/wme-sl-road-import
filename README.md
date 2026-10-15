@@ -49,13 +49,15 @@ The segment's two end nodes never move, so its connections stay as they are. Onl
 
 ## Disconnected ends
 
-A WME dead end within 5 m of another road it isn't connected to gets an orange ring. That's usually a junction someone meant to make and missed by a few metres, including the end of a road you just added. Connect it and the ring goes away. This only looks at WME data, so it works without loading anything. Ferries, railways and runways are ignored, since they don't connect to roads. The rings let clicks through, so you can drag the node right under one. The sidebar shows how many there are.
+A WME dead end within 5 m of another road it isn't connected to gets an orange ring. That's usually a junction someone meant to make and missed by a few metres, including the end of a road you just added. Connect it and the ring goes away. This only looks at WME data, so it works without loading anything. Ferries, railways and runways are ignored, since they don't connect to roads. The rings let clicks through, so you can drag the node right under one. They show at every zoom, also with the layer hidden, and zoomed out below 16 they turn into solid orange dots so they're easier to spot.
+
+The sidebar lists every end found this session by its coordinates. Click one and the map centres on it, at zoom 18 or closer. An end stays listed when you pan away, and drops off once WME shows it fixed. If you deleted the road instead, that happens the next time WME loads that spot at zoom 16+. A reload starts the list over.
 
 ## Options
 
 - Show layer (on by default)
 - Show already mapped roads (off by default): draws every loaded cadastre road as a thin cyan line under the pink ones, so you can check WME geometry against it. Cyan lines can't be clicked.
-- Show disconnected ends (on by default)
+- Show disconnected ends (on by default): turning it off also empties the list
 - Road type override (resets to Auto on reload)
 
 ## Keyboard shortcuts

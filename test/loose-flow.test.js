@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { bootScript, fire, argsOf, shortcut, load, features, LAYER } = require('./harness.js');
+const { bootScript, fire, argsOf, shortcut, load, features, LAYER, LOOSE_LAYER } = require('./harness.js');
 
 const KX = 111320 * Math.cos(46 * Math.PI / 180);
 const at = (x, y) => [14.5 + x / KX, 46 + y / 110540];
@@ -23,7 +23,7 @@ const NODES = [
 ];
 const DISCONNECTED = { wmeSegments: SEGMENTS, wmeNodes: NODES };
 
-const rings = (ctx) => features(ctx).filter(f => f.properties.state === 'loose');
+const rings = (ctx) => ctx.layers.get(LOOSE_LAYER).features;
 const settle = () => new Promise(r => setTimeout(r, 300));
 
 test('a disconnected end is ringed without loading anything', async () => {
@@ -36,11 +36,99 @@ test('a disconnected end is ringed without loading anything', async () => {
   }, DISCONNECTED);
 });
 
+const styleOf = (layers, state) => layers.get(LOOSE_LAYER).styleRules.filter(r => r.predicate({ state })).pop()?.style;
+
 test('the ring lets the mouse through to the node under it', async () => {
   const { layers } = await bootScript();
-  const rule = layers.get(LAYER).styleRules.filter(r => r.predicate({ state: 'loose' })).pop();
-  assert.ok(rule, 'a ring has its own style');
-  assert.strictEqual(rule.style.pointerEvents, 'none');
+  for (const state of ['loose', 'loose-dot']) {
+    assert.ok(styleOf(layers, state), `${state} has its own style`);
+    assert.strictEqual(styleOf(layers, state).pointerEvents, 'none');
+  }
+});
+
+test('disconnected ends show at any zoom, whatever Show layer says', async () => {
+  await bootScript({ 'qrsl-layer-visible': '0' }, async (ctx) => {
+    await settle();
+    assert.strictEqual(ctx.layers.get(LAYER).visible, false);
+    assert.notStrictEqual(ctx.layers.get(LOOSE_LAYER).visible, false);
+    assert.strictEqual(rings(ctx).length, 1);
+  }, { ...DISCONNECTED, zoom: 12 });
+});
+
+test('zoomed out, an end is a solid dot, zoomed in a ring', async () => {
+  await bootScript({}, async (ctx) => {
+    await settle();
+    assert.deepStrictEqual(rings(ctx).map(f => f.properties.state), ['loose-dot']);
+    assert.ok(styleOf(ctx.layers, 'loose-dot').fillOpacity > 0.5, 'the dot is filled');
+    ctx.options.zoom = 17;
+    fire(ctx.handlers, 'wme-map-zoom-changed');
+    assert.deepStrictEqual(rings(ctx).map(f => f.properties.state), ['loose']);
+  }, { ...DISCONNECTED, zoom: 14 });
+});
+
+test('an end stays listed after WME unloads it', async () => {
+  await bootScript({}, async (ctx) => {
+    await settle();
+    // Panned far away: WME drops the data and loads another area.
+    ctx.options.wmeSegments = [];
+    ctx.options.wmeNodes = [];
+    ctx.options.extent = [15.0, 46.5, 15.1, 46.6];
+    fire(ctx.handlers, 'wme-data-model-objects-removed', { dataModelName: 'segments', objectIds: [1, 2] });
+    fire(ctx.handlers, 'wme-map-data-loaded');
+    await settle();
+    assert.strictEqual(rings(ctx).length, 1);
+    assert.match(ctx.dom('#qrsl-loose-list').innerHTML, /46\.00003, 14\.50000/);
+  }, { ...DISCONNECTED });
+});
+
+test('zoomed out, an end stays when WME has dropped the road next to it', async () => {
+  await bootScript({}, async (ctx) => {
+    await settle();
+    ctx.options.zoom = 14;
+    ctx.options.wmeSegments = [SEGMENTS[1]];
+    ctx.options.wmeNodes = NODES.slice(2);
+    fire(ctx.handlers, 'wme-map-zoom-changed');
+    fire(ctx.handlers, 'wme-map-data-loaded');
+    await settle();
+    assert.deepStrictEqual(rings(ctx).map(f => f.properties.state), ['loose-dot']);
+  }, { ...DISCONNECTED });
+});
+
+test('a deleted road clears once WME has loaded its spot again', async () => {
+  await bootScript({}, async (ctx) => {
+    await settle();
+    ctx.options.wmeSegments = [SEGMENTS[0]];
+    ctx.options.wmeNodes = NODES.slice(0, 2);
+    fire(ctx.handlers, 'wme-data-model-objects-removed', { dataModelName: 'segments', objectIds: [2] });
+    await settle();
+    assert.strictEqual(rings(ctx).length, 1, 'an edit alone could be WME still loading');
+    fire(ctx.handlers, 'wme-map-data-loaded');
+    await settle();
+    assert.deepStrictEqual(rings(ctx), []);
+  }, { ...DISCONNECTED });
+});
+
+test('the sidebar lists each end and a click centres the map on it', async () => {
+  await bootScript({}, async (ctx) => {
+    await settle();
+    assert.match(ctx.dom('#qrsl-loose').textContent, /^1 disconnected end/);
+    const html = ctx.dom('#qrsl-loose-list').innerHTML;
+    assert.match(html, /data-node="3"/);
+    assert.match(html, /46\.00003, 14\.50000/);
+    const click = ctx.domHandlers.find(h => h.selector === '#qrsl-loose-list' && h.type === 'click').handler;
+    click({ target: { closest: () => ({ dataset: { node: '3' } }) } });
+    const [lon, lat] = at(0, 3);
+    assert.deepStrictEqual(argsOf(ctx.calls, 'Map.setMapCenter'), [{ lonLat: { lon, lat }, zoomLevel: 18 }]);
+  }, { ...DISCONNECTED });
+});
+
+test('going to an end never zooms the map out', async () => {
+  await bootScript({}, async (ctx) => {
+    await settle();
+    const click = ctx.domHandlers.find(h => h.selector === '#qrsl-loose-list' && h.type === 'click').handler;
+    click({ target: { closest: () => ({ dataset: { node: '3' } }) } });
+    assert.strictEqual(argsOf(ctx.calls, 'Map.setMapCenter')[0].zoomLevel, 20);
+  }, { ...DISCONNECTED, zoom: 20 });
 });
 
 test('segment and node changes are tracked', async () => {

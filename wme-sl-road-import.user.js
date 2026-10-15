@@ -25,6 +25,7 @@
   let wmeSDK;
   const SCRIPT_ID = 'quick-road-sl-importer';
   const SDK_LAYER_NAME = 'qrsl-roads';
+  const LOOSE_LAYER_NAME = 'qrsl-loose';
 
   const CADASTRE_API = 'https://ipi.eprostor.gov.si/wfs-si-gurs-kgi/ogc/features/collections/SI.GURS.KGI:LINIJE_CESTE_G/items';
   const CADASTRE_LIMIT = 1000;
@@ -50,6 +51,8 @@
   // Further than this, a dead end next to a road is more likely a real dead end than
   // a junction the editor missed.
   const LOOSE_END_MAX_DISTANCE_M = 5;
+  // Close enough to drag a node onto a road.
+  const LOOSE_JUMP_ZOOM = 18;
 
   const LS = {
     getLayerVisible() { return localStorage.getItem('qrsl-layer-visible') !== '0'; }, // default on
@@ -63,7 +66,7 @@
   const INSTRUCTIONS_HTML = `<b>Instructions</b><br/>
     1) Zoom in to level ${MIN_LOAD_ZOOM}+ • 2) Click "Load roads in view" • 3) <b>Click a pink line to add it as a segment</b><br/>
     Connect it to the network yourself. Grey dashed = added since the last load.<br/>
-    Orange ring = a dead end next to a road it isn't connected to.`;
+    Orange ring (a dot when zoomed out) = a dead end next to a road it isn't connected to.`;
 
   const KBD_STYLE = 'margin-left:6px;font-size:10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;'
     + 'background:rgba(0,0,0,0.08);border-radius:3px;padding:2px 5px;color:#555;';
@@ -414,7 +417,7 @@
 
   // Dead ends (nodes with one segment) within maxDistM of another road: usually a
   // junction the editor meant to make and missed by a few metres. Takes the SDK's
-  // segments and nodes, returns [{ nodeId, coords }].
+  // segments and nodes, returns [{ nodeId, segmentId, coords }].
   function looseEnds(segments, nodes, maxDistM) {
     const roads = [];
     for (const s of segments) {
@@ -442,9 +445,33 @@
         for (let i = 1; i < sp.length && !near; i++) near = pointToSegmentDistance([0, 0], sp[i - 1], sp[i]) <= maxDistM;
         if (near) break;
       }
-      if (near) found.push({ nodeId: n.id, coords: [p[0], p[1]] });
+      if (near) found.push({ nodeId: n.id, segmentId: ids[0], coords: [p[0], p[1]] });
     }
     return found;
+  }
+
+  // The session's list of disconnected ends after a refresh, given what looseEnds
+  // finds now. An end stays listed until WME shows it fixed, so panning away doesn't
+  // lose it: its node got a second segment, its segment now ends at another node
+  // (dragged onto a road), or both are gone from a spot WME has just loaded (the road
+  // was deleted). Still a dead end with no road near counts only with every road type
+  // loaded: zoomed out WME has just the bigger roads, maybe not the one it misses.
+  // view: { allRoadTypes, spotLoaded(coords) }. Listed ends keep their place.
+  function updateLooseList(listed, found, segments, nodes, view) {
+    const now = new Map(found.map(e => [e.nodeId, e]));
+    const segmentIds = new Set(segments.map(s => s?.id));
+    const nodeById = new Map(nodes.map(n => [n?.id, n]));
+    const fixed = (e) => {
+      const n = nodeById.get(e.nodeId);
+      if (n) {
+        const ids = n.connectedSegmentIds || [];
+        return ids.length > 1 || (view.allRoadTypes && ids.every(id => segmentIds.has(id)));
+      }
+      return segmentIds.has(e.segmentId) || view.spotLoaded(e.coords);
+    };
+    const kept = listed.filter(e => now.has(e.nodeId) || !fixed(e)).map(e => now.get(e.nodeId) || e);
+    const keptIds = new Set(kept.map(e => e.nodeId));
+    return kept.concat(found.filter(e => !keptIds.has(e.nodeId)));
   }
 
   // The vertices of a projected cadastre line between two positions along it, in the
@@ -743,17 +770,18 @@
     let layerWanted = LS.getLayerVisible();
     let showMapped = LS.getShowMapped();
     let showLoose = LS.getShowLoose();
-    let looseNodes = [];         // dead ends next to a road they aren't connected to
+    let looseNodes = [];         // dead ends next to a road they aren't connected to, this session
     let layerShown = false;
     let layerIds = [];
+    let looseIds = [];
 
     try {
       I18n.translations[I18n.currentLocale()].layers.name[SCRIPT_ID] = 'Quick Road Importer';
     } catch (_) {}
 
     // Grey and cyan lines lie exactly on WME segments: the one just created, or a road
-    // WME already has. Orange rings sit on WME nodes. They let the mouse through, or
-    // they would catch the drags and clicks meant for those segments and nodes.
+    // WME already has. They let the mouse through, or they would catch the drags and
+    // clicks meant for those segments and their nodes.
     wmeSDK.Map.addLayer({
       layerName: SDK_LAYER_NAME,
       styleRules: [
@@ -781,18 +809,34 @@
             strokeColor: '#888888', strokeWidth: 4, strokeOpacity: 0.5, strokeDashstyle: 'dash',
             pointerEvents: 'none'
           }
-        },
+        }
+      ]
+    });
+    wmeSDK.Map.setLayerVisibility({ layerName: SDK_LAYER_NAME, visibility: false });
+    wmeSDK.Events.trackLayerEvents({ layerName: SDK_LAYER_NAME });
+
+    // Its own layer, so the ends show at every zoom and with the roads hidden. Zoomed
+    // out, a ring around a node is lost among the roads, so it becomes a solid dot.
+    // Both sit on a WME node and let the mouse through to it, like the grey lines.
+    wmeSDK.Map.addLayer({
+      layerName: LOOSE_LAYER_NAME,
+      styleRules: [
         {
           predicate: (p) => p.state === 'loose',
           style: {
             pointRadius: 12, fill: false, strokeColor: '#ff8c00', strokeWidth: 3, strokeOpacity: 0.95,
             pointerEvents: 'none'
           }
+        },
+        {
+          predicate: (p) => p.state === 'loose-dot',
+          style: {
+            pointRadius: 8, fillColor: '#ff8c00', fillOpacity: 0.9, strokeColor: '#ffffff', strokeWidth: 2,
+            pointerEvents: 'none'
+          }
         }
       ]
     });
-    wmeSDK.Map.setLayerVisibility({ layerName: SDK_LAYER_NAME, visibility: false });
-    wmeSDK.Events.trackLayerEvents({ layerName: SDK_LAYER_NAME });
 
     function updateLayerVisibility() {
       const visible = layerWanted && wmeSDK.Map.getZoomLevel() >= MIN_LOAD_ZOOM;
@@ -824,8 +868,24 @@
       }
     }
 
-    // Ids are recorded before the add: if it throws part-way, removing an id that never
-    // landed is harmless, while an orphan feature would stay clickable.
+    // Swaps a layer's features and returns the ids now on it. Ids are recorded before
+    // the add: if it throws part-way, removing an id that never landed is harmless,
+    // while an orphan feature would stay clickable.
+    function replaceFeatures(layerName, ids, features) {
+      try {
+        if (ids.length) {
+          wmeSDK.Map.removeFeaturesFromLayer({ layerName, featureIds: ids });
+          ids = [];
+        }
+        if (!features.length) return ids;
+        ids = features.map(f => f.id);
+        wmeSDK.Map.addFeaturesToLayer({ layerName, features });
+      } catch (e) {
+        console.warn('[SL-ROAD] rendering failed:', e);
+      }
+      return ids;
+    }
+
     function render() {
       const feature = (id, coords, state) => ({
         type: 'Feature', id, geometry: { type: 'LineString', coordinates: coords }, properties: { state }
@@ -836,23 +896,23 @@
         ...(showMapped ? [...lines.values()].map(l => feature(`ref-${l.id}`, l.coords, 'reference')) : []),
         ...[...pieces.values()].map(p => feature(p.id, p.coords, 'missing')),
         ...[...imported].map(([id, a]) => feature(id, a.coords, 'imported')),
-        ...(snapPreview ? [feature('snap-preview', snapPreview.coords, 'preview')] : []),
-        ...looseNodes.map(e => ({
-          type: 'Feature', id: `loose-${e.nodeId}`, geometry: { type: 'Point', coordinates: e.coords },
-          properties: { state: 'loose' }
-        }))
+        ...(snapPreview ? [feature('snap-preview', snapPreview.coords, 'preview')] : [])
       ];
-      try {
-        if (layerIds.length) {
-          wmeSDK.Map.removeFeaturesFromLayer({ layerName: SDK_LAYER_NAME, featureIds: layerIds });
-          layerIds = [];
-        }
-        if (!features.length) return;
-        layerIds = features.map(f => f.id);
-        wmeSDK.Map.addFeaturesToLayer({ layerName: SDK_LAYER_NAME, features });
-      } catch (e) {
-        console.warn('[SL-ROAD] rendering failed:', e);
-      }
+      layerIds = replaceFeatures(SDK_LAYER_NAME, layerIds, features);
+    }
+
+    function renderLoose() {
+      const state = wmeSDK.Map.getZoomLevel() >= MIN_LOAD_ZOOM ? 'loose' : 'loose-dot';
+      looseIds = replaceFeatures(LOOSE_LAYER_NAME, looseIds, looseNodes.map(e => ({
+        type: 'Feature', id: `loose-${e.nodeId}`, geometry: { type: 'Point', coordinates: e.coords },
+        properties: { state }
+      })));
+    }
+
+    // [minLon, minLat, maxLon, maxLat] of the view.
+    function mapBounds() {
+      const ext = wmeSDK.Map.getMapExtent();
+      return Array.isArray(ext) ? ext : [ext.lonMin, ext.latMin, ext.lonMax, ext.latMax];
     }
 
     function resetState() {
@@ -863,7 +923,13 @@
       partial = false;
     }
 
-    wmeSDK.Events.on({ eventName: 'wme-map-zoom-changed', eventHandler: () => updateLayerVisibility() });
+    wmeSDK.Events.on({
+      eventName: 'wme-map-zoom-changed',
+      eventHandler: () => {
+        updateLayerVisibility();
+        renderLoose();
+      }
+    });
     updateLayerVisibility();
 
     wmeSDK.Sidebar.registerScriptTab().then(({ tabLabel, tabPane }) => {
@@ -892,6 +958,7 @@
           </div>
           <div id="qrsl-status" style="margin-top:10px;font-size:12px;color:#666;line-height:1.4;">${INSTRUCTIONS_HTML}</div>
           <div id="qrsl-loose" style="margin-top:6px;font-size:12px;color:#b35f00;"></div>
+          <div id="qrsl-loose-list" style="max-height:160px;overflow-y:auto;font-size:12px;color:#b35f00;"></div>
           <div id="qrsl-hover" style="margin-top:6px;font-size:12px;font-weight:bold;min-height:1.4em;"></div>
         </div>
       `;
@@ -907,6 +974,7 @@
       const statusDiv    = tabPane.querySelector('#qrsl-status');
       const hoverDiv     = tabPane.querySelector('#qrsl-hover');
       const looseDiv     = tabPane.querySelector('#qrsl-loose');
+      const looseList    = tabPane.querySelector('#qrsl-loose-list');
 
       setChecked(chkVis, layerWanted);
       setChecked(chkMapped, showMapped);
@@ -934,7 +1002,6 @@
         showLoose = !on;
         LS.setShowLoose(!on);
         refreshLoose();
-        render();
       });
 
       selRoadType.addEventListener('change', () => {
@@ -972,10 +1039,7 @@
           hoverDiv.textContent = '';
           statusDiv.textContent = 'Loading roads…';
 
-          const ext = wmeSDK.Map.getMapExtent();
-          const [minLon, minLat, maxLon, maxLat] = Array.isArray(ext)
-            ? ext
-            : [ext.lonMin, ext.latMin, ext.lonMax, ext.latMax];
+          const [minLon, minLat, maxLon, maxLat] = mapBounds();
 
           let result;
           try {
@@ -1030,24 +1094,53 @@
       btnLoad.addEventListener('click', () => loadRoads());
       btnClear.addEventListener('click', () => clearRoads());
 
-      // WME data only, so it runs with or without a cadastre load.
-      function refreshLoose() {
-        looseNodes = showLoose
-          ? looseEnds(wmeSDK.DataModel.Segments.getAll(), wmeSDK.DataModel.Nodes.getAll(), LOOSE_END_MAX_DISTANCE_M)
-          : [];
+      // WME data only, so it runs with or without a cadastre load. Only right after a
+      // data load does the view stand for what WME has loaded: an edit event can come
+      // while WME is still fetching the area just panned to.
+      function refreshLoose(dataLoaded = false) {
+        if (!showLoose) {
+          looseNodes = [];
+        } else {
+          const segments = wmeSDK.DataModel.Segments.getAll();
+          const nodes = wmeSDK.DataModel.Nodes.getAll();
+          const allRoadTypes = wmeSDK.Map.getZoomLevel() >= MIN_LOAD_ZOOM;
+          let spotLoaded = () => false;
+          if (dataLoaded && allRoadTypes) {
+            const [minLon, minLat, maxLon, maxLat] = mapBounds();
+            spotLoaded = ([lon, lat]) => lon >= minLon && lon <= maxLon && lat >= minLat && lat <= maxLat;
+          }
+          looseNodes = updateLooseList(looseNodes, looseEnds(segments, nodes, LOOSE_END_MAX_DISTANCE_M),
+            segments, nodes, { allRoadTypes, spotLoaded });
+        }
         const n = looseNodes.length;
-        looseDiv.textContent = n ? `${n} disconnected ${n === 1 ? 'end' : 'ends'}, ringed in orange` : '';
+        looseDiv.textContent = n ? `${n} disconnected ${n === 1 ? 'end, click it' : 'ends, click one'} to go there` : '';
+        looseList.innerHTML = looseNodes.map(e => `<div data-node="${e.nodeId}" style="cursor:pointer;text-decoration:underline;">`
+          + `${e.coords[1].toFixed(5)}, ${e.coords[0].toFixed(5)}</div>`).join('');
+        renderLoose();
       }
+
+      looseList.addEventListener('click', (ev) => {
+        const row = ev.target?.closest?.('[data-node]');
+        const end = row && looseNodes.find(e => String(e.nodeId) === row.dataset.node);
+        if (!end) return;
+        try {
+          wmeSDK.Map.setMapCenter({
+            lonLat: { lon: end.coords[0], lat: end.coords[1] },
+            zoomLevel: Math.max(wmeSDK.Map.getZoomLevel(), LOOSE_JUMP_ZOOM)
+          });
+        } catch (e) {
+          console.warn('[SL-ROAD] could not centre the map:', e);
+        }
+      });
 
       wmeSDK.Events.on({
         eventName: 'wme-map-data-loaded',
         eventHandler: () => {
-          refreshLoose();
-          if (lines.size) {
-            refreshPieces();
-            updateStatus();
-          }
+          refreshLoose(true);
+          if (!lines.size) return;
+          refreshPieces();
           render();
+          updateStatus();
         }
       });
 
@@ -1056,7 +1149,7 @@
       let looseTimer = null;
       const scheduleLoose = () => {
         clearTimeout(looseTimer);
-        looseTimer = setTimeout(() => { refreshLoose(); render(); }, 100);
+        looseTimer = setTimeout(() => refreshLoose(), 100);
       };
       wmeSDK.Events.trackDataModelEvents({ dataModelName: 'segments' });
       wmeSDK.Events.trackDataModelEvents({ dataModelName: 'nodes' });
@@ -1069,7 +1162,6 @@
         });
       }
       refreshLoose();
-      render();
 
       wmeSDK.Events.on({
         eventName: 'wme-layer-feature-mouse-enter',
@@ -1291,7 +1383,8 @@
       ];
       const optional = [
         'Shortcuts.createShortcut',
-        'Shortcuts.deleteShortcut'
+        'Shortcuts.deleteShortcut',
+        'Map.setMapCenter'             // the list of disconnected ends can't take you there
       ];
 
       const isMissing = (path) => {
@@ -1333,6 +1426,7 @@
       missingStretches,
       snapToCadastre,
       looseEnds,
+      updateLooseList,
       buildItemsUrl,
       buildRoadLines,
       classifyFetchFailure,
