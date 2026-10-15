@@ -300,6 +300,16 @@
     return { minLon, minLat, maxLon, maxLat };
   }
 
+  // Whether box b comes within distM of box a. A miss means nothing in b can be near
+  // anything in a. Checked in degrees, so the thousands of far segments in a view are
+  // never projected.
+  function boxesNear(a, b, distM) {
+    const padLon = distM / metresPerDegLon((a.minLat + a.maxLat) / 2);
+    const padLat = distM / M_PER_DEG_LAT;
+    return b.maxLon >= a.minLon - padLon && b.minLon <= a.maxLon + padLon
+      && b.maxLat >= a.minLat - padLat && b.minLat <= a.maxLat + padLat;
+  }
+
   // WME segment geometries with their boxes, computed once per refresh rather than
   // once per cadastre line: the refresh runs on every pan.
   function prepareSegments(segmentLines) {
@@ -370,18 +380,12 @@
   function missingStretches(coords, segments, stepM, maxDistM, minLengthM) {
     if (coords.length < 2) return [];
 
-    // Segments wholly outside the line's box, grown by maxDistM, cannot reach any
-    // sample. Checked in degrees so the thousands of far segments in a view are
-    // never projected.
     const box = bboxOf(coords);
-    const padLon = maxDistM / metresPerDegLon(coords[0][1]);
-    const padLat = maxDistM / M_PER_DEG_LAT;
     const project = makeLocalProjection(coords[0]);
 
     const edges = [];
     for (const { coords: seg, box: b } of segments) {
-      if (b.maxLon < box.minLon - padLon || b.minLon > box.maxLon + padLon
-        || b.maxLat < box.minLat - padLat || b.minLat > box.maxLat + padLat) continue;
+      if (!boxesNear(box, b, maxDistM)) continue;
       const sp = seg.map(project);
       for (let i = 1; i < sp.length; i++) edges.push([sp[i - 1], sp[i]]);
     }
@@ -433,14 +437,11 @@
       const ids = n?.connectedSegmentIds;
       // A node whose only segment WME hasn't loaded sits at the edge of the loaded area.
       if (!Array.isArray(p) || !Array.isArray(ids) || ids.length !== 1 || !roadIds.has(ids[0])) continue;
-      const padLon = maxDistM / metresPerDegLon(p[1]);
-      const padLat = maxDistM / M_PER_DEG_LAT;
+      const box = bboxOf([p]);
       const project = makeLocalProjection(p);
       let near = false;
       for (const r of roads) {
-        const b = r.box;
-        if (r.id === ids[0] || b.maxLon < p[0] - padLon || b.minLon > p[0] + padLon
-          || b.maxLat < p[1] - padLat || b.minLat > p[1] + padLat) continue;
+        if (r.id === ids[0] || !boxesNear(box, r.box, maxDistM)) continue;
         const sp = r.coords.map(project);
         for (let i = 1; i < sp.length && !near; i++) near = pointToSegmentDistance([0, 0], sp[i - 1], sp[i]) <= maxDistM;
         if (near) break;
@@ -491,38 +492,15 @@
     return out;
   }
 
-  // New geometry for a WME segment, moved onto the cadastre line(s) running alongside
-  // it. The two end points are the segment's own, so its nodes and connections stay
-  // where they are.
-  //
   // Walks the segment every stepM metres and matches each sample to the nearest
-  // cadastre edge running alongside within maxDistM. It keeps to the same cadastre
-  // line while that still qualifies, so a road between two carriageways doesn't
-  // zigzag, and keeps the cadastre's own vertices between matches, so bends keep their
-  // shape. Where WME drew a bend too far off for any match, the cadastre's own
-  // geometry between the matches on either side fills the gap.
+  // cadastre edge running alongside within maxDistM. Each match has its line, pos
+  // (metres along that cadastre line) and d (metres along the segment). It keeps to
+  // the same cadastre line while that still qualifies, so a road between two
+  // carriageways doesn't zigzag. Samples with no match are left out.
   //
-  // Returns null, since half a snap is worse than none, when the segment's first or
-  // last match is more than endSkipM from its end, when under SNAP_MIN_MATCHED of it
-  // matches (probably a different road), or when it would jump between cadastre lines
-  // that don't meet.
-  function snapToCadastre(segCoords, cadastreLines, stepM, maxDistM, endSkipM, toleranceM) {
-    if (segCoords.length < 2) return null;
-    const project = makeLocalProjection(segCoords[0]);
-
-    const box = bboxOf(segCoords);
-    const padLon = maxDistM / metresPerDegLon(segCoords[0][1]);
-    const padLat = maxDistM / M_PER_DEG_LAT;
-    const candidates = [];
-    for (const coords of cadastreLines) {
-      if (!Array.isArray(coords) || coords.length < 2) continue;
-      const b = bboxOf(coords);
-      if (b.maxLon < box.minLon - padLon || b.minLon > box.maxLon + padLon
-        || b.maxLat < box.minLat - padLat || b.minLat > box.maxLat + padLat) continue;
-      const pts = coords.map(project);
-      candidates.push({ coords, pts, cum: cumulative(pts) });
-    }
-
+  // null when the segment's first or last match is more than endSkipM from its end,
+  // or when under SNAP_MIN_MATCHED of it matches (probably a different road).
+  function matchAlong(segCoords, project, candidates, stepM, maxDistM, endSkipM) {
     const segPts = segCoords.map(project);
     const segCum = cumulative(segPts);
     const total = segCum[segCum.length - 1];
@@ -558,7 +536,29 @@
     }
     if (!matches.length || matches[matches.length - 1].d < total - endSkipM) return null;
     if (matches.length < SNAP_MIN_MATCHED * ds.length) return null;
+    return matches;
+  }
 
+  // The nearest pair of ends of two projected cadastre lines, if within maxDistM, as
+  // { a, b } with each end's pos along its line and its point.
+  function closestEnds(lineA, lineB, maxDistM) {
+    const ends = (line) => [{ pos: 0, pt: line.pts[0] }, { pos: line.cum[line.cum.length - 1], pt: line.pts[line.pts.length - 1] }];
+    let joint = null;
+    for (const a of ends(lineA)) {
+      for (const b of ends(lineB)) {
+        const dist = Math.hypot(a.pt[0] - b.pt[0], a.pt[1] - b.pt[1]);
+        if (dist <= maxDistM && (!joint || dist < joint.dist)) joint = { a, b, dist };
+      }
+    }
+    return joint;
+  }
+
+  // The segment's new points through its matches, from its own first point to its own
+  // last. Between two matches on one cadastre line it keeps that line's vertices, so
+  // bends keep their shape. Where WME drew a bend too far off for any match, those
+  // vertices fill the gap. null when it would jump between cadastre lines that don't
+  // meet.
+  function pathThrough(segCoords, matches, maxDistM) {
     const out = [segCoords[0]];
     let prev = null;
     for (const m of matches) {
@@ -568,14 +568,7 @@
         // Onto another cadastre line, normally at a cadastre junction: finish the old
         // line to its end there and start the new one from it, so the corner between
         // them is kept.
-        const ends = (line) => [{ pos: 0, pt: line.pts[0] }, { pos: line.cum[line.cum.length - 1], pt: line.pts[line.pts.length - 1] }];
-        let joint = null;
-        for (const a of ends(prev.line)) {
-          for (const b of ends(m.line)) {
-            const dist = Math.hypot(a.pt[0] - b.pt[0], a.pt[1] - b.pt[1]);
-            if (dist <= maxDistM && (!joint || dist < joint.dist)) joint = { a, b, dist };
-          }
-        }
+        const joint = closestEnds(prev.line, m.line, maxDistM);
         if (!joint) return null;
         out.push(...verticesBetween(prev.line, prev.pos, joint.a.pos, false));
         out.push(pointAlong(prev.line.coords, prev.line.cum, joint.a.pos));
@@ -585,7 +578,28 @@
       prev = m;
     }
     out.push(segCoords[segCoords.length - 1]);
+    return out;
+  }
 
+  // New geometry for a WME segment, moved onto the cadastre line(s) running alongside
+  // it. The two end points are the segment's own, so its nodes and connections stay
+  // where they are. null, since half a snap is worse than none, whenever matchAlong or
+  // pathThrough gives up.
+  function snapToCadastre(segCoords, cadastreLines, stepM, maxDistM, endSkipM, toleranceM) {
+    if (segCoords.length < 2) return null;
+    const project = makeLocalProjection(segCoords[0]);
+
+    const box = bboxOf(segCoords);
+    const candidates = [];
+    for (const coords of cadastreLines) {
+      if (!Array.isArray(coords) || coords.length < 2 || !boxesNear(box, bboxOf(coords), maxDistM)) continue;
+      const pts = coords.map(project);
+      candidates.push({ coords, pts, cum: cumulative(pts) });
+    }
+
+    const matches = matchAlong(segCoords, project, candidates, stepM, maxDistM, endSkipM);
+    const out = matches && pathThrough(segCoords, matches, maxDistM);
+    if (!out) return null;
     const deduped = out.filter((p, k) => k === 0 || p[0] !== out[k - 1][0] || p[1] !== out[k - 1][1]);
     return simplifyLine(deduped, toleranceM);
   }
