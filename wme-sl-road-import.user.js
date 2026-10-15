@@ -670,107 +670,79 @@
     return FETCH_RETRY_BACKOFF_MS[i];
   }
 
+  // One GET. Resolves { kind: 'load', status, text }, or just { kind } for 'error' and
+  // 'timeout'. Never rejects, so fetchCadastre handles every outcome in one place.
+  function getPage(url) {
+    return new Promise(resolve => GM_xmlhttpRequest({
+      method: 'GET',
+      url,
+      timeout: FETCH_TIMEOUT_MS,
+      onload: (response) => resolve({ kind: 'load', status: response.status, text: response.responseText }),
+      onerror: () => resolve({ kind: 'error' }),
+      ontimeout: () => resolve({ kind: 'timeout' })
+    }));
+  }
+
+  // The page as JSON, or null when it isn't a feature collection.
+  function parsePage(text) {
+    try {
+      const data = JSON.parse(text);
+      return Array.isArray(data?.features) ? data : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   // Cadastre roads in bbox, page by page. shouldAbort is checked between pages and
   // after each backoff, so a Clear or a newer Load stops the chain.
   //
   // Resolves { features, complete }. complete is false when the page cap was hit or a
   // page failed after earlier ones arrived. Rejects with err.userMessage when nothing
   // loaded.
-  function fetchCadastre(bbox, shouldAbort) {
-    return new Promise((resolve, reject) => {
-      const allFeatures = [];
-      let startIndex = 0;
-      let pageCount = 0;
-      let retriesUsed = 0;
+  async function fetchCadastre(bbox, shouldAbort) {
+    const features = [];
+    let startIndex = 0;
+    let retriesUsed = 0;
 
-      const aborted = () => typeof shouldAbort === 'function' && shouldAbort();
+    for (let page = 1; ; page++) {
+      if (shouldAbort()) return { features, complete: false };
+      if (page > CADASTRE_MAX_PAGES) {
+        console.warn(`[SL-ROAD] cadastre result truncated at ${CADASTRE_MAX_PAGES} pages`);
+        toast('Too many roads in view, result truncated. Zoom in.', 'warning');
+        return { features, complete: false };
+      }
 
-      function handleFailure(attempt, kind, status) {
-        const { retryable, reason } = classifyFetchFailure(kind, status);
-        const verdict = decideFetchRetry({
-          retryable, attempt, retriesUsed, haveFeatures: allFeatures.length > 0
-        });
+      let data;
+      for (let attempt = 1; ; attempt++) {
+        const response = await getPage(buildItemsUrl(bbox, startIndex));
+        data = response.kind === 'load' ? parsePage(response.text) : null;
+        if (data) break;
 
-        if (verdict === 'retry') {
-          retriesUsed++;
-          toast(
-            `eProstor ${reason}, retrying (attempt ${attempt + 1} of ${FETCH_PAGE_RETRIES + 1})`,
-            'warning'
-          );
-          setTimeout(() => {
-            if (aborted()) { resolve({ features: allFeatures, complete: false }); return; }
-            requestPage(attempt + 1);
-          }, fetchRetryDelay(attempt));
-          return;
-        }
-
+        const { retryable, reason } = classifyFetchFailure(response.kind, response.status);
+        const verdict = decideFetchRetry({ retryable, attempt, retriesUsed, haveFeatures: features.length > 0 });
         if (verdict === 'partial') {
           console.warn(`[SL-ROAD] eProstor ${reason}; result is partial`);
-          toast(`eProstor ${reason}, showing the ${allFeatures.length} roads that loaded`, 'warning');
-          resolve({ features: allFeatures, complete: false });
-          return;
+          toast(`eProstor ${reason}, showing the ${features.length} roads that loaded`, 'warning');
+          return { features, complete: false };
         }
-
-        const err = new Error(`eProstor ${reason}`);
-        err.userMessage = `eProstor ${reason}, no roads loaded`;
-        reject(err);
+        if (verdict === 'fail') {
+          const err = new Error(`eProstor ${reason}`);
+          err.userMessage = `eProstor ${reason}, no roads loaded`;
+          throw err;
+        }
+        retriesUsed++;
+        toast(`eProstor ${reason}, retrying (attempt ${attempt + 1} of ${FETCH_PAGE_RETRIES + 1})`, 'warning');
+        await new Promise(resolve => setTimeout(resolve, fetchRetryDelay(attempt)));
+        if (shouldAbort()) return { features, complete: false };
       }
 
-      function requestPage(attempt) {
-        if (aborted()) {
-          resolve({ features: allFeatures, complete: false });
-          return;
-        }
-        // Counted per page, not per attempt: a retry re-fetches the same startIndex.
-        if (attempt === 1 && ++pageCount > CADASTRE_MAX_PAGES) {
-          console.warn(`[SL-ROAD] cadastre result truncated at ${CADASTRE_MAX_PAGES} pages`);
-          toast('Too many roads in view, result truncated. Zoom in.', 'warning');
-          resolve({ features: allFeatures, complete: false });
-          return;
-        }
-
-        GM_xmlhttpRequest({
-          method: 'GET',
-          url: buildItemsUrl(bbox, startIndex),
-          timeout: FETCH_TIMEOUT_MS,
-          onload: function (response) {
-            let data;
-            try {
-              data = JSON.parse(response.responseText);
-            } catch (err) {
-              handleFailure(attempt, 'load', response.status);
-              return;
-            }
-            if (!data.features || !Array.isArray(data.features)) {
-              handleFailure(attempt, 'load', response.status);
-              return;
-            }
-
-            allFeatures.push(...data.features);
-
-            const returned = data.numberReturned || data.features.length;
-            const total = typeof data.numberMatched === 'number' ? data.numberMatched : null;
-            const hasMore = total != null
-              ? startIndex + returned < total
-              : returned >= CADASTRE_LIMIT;
-            if (hasMore && returned > 0) {
-              startIndex += returned;
-              requestPage(1);
-            } else {
-              resolve({ features: allFeatures, complete: true });
-            }
-          },
-          onerror: function () {
-            handleFailure(attempt, 'error');
-          },
-          ontimeout: function () {
-            handleFailure(attempt, 'timeout');
-          }
-        });
-      }
-
-      requestPage(1);
-    });
+      features.push(...data.features);
+      const returned = data.numberReturned || data.features.length;
+      const total = typeof data.numberMatched === 'number' ? data.numberMatched : null;
+      const hasMore = total != null ? startIndex + returned < total : returned >= CADASTRE_LIMIT;
+      if (!hasMore || returned === 0) return { features, complete: true };
+      startIndex += returned;
+    }
   }
 
   function init() {
