@@ -30,14 +30,17 @@ function distanceToPolyline(p, coords) {
   return best;
 }
 
+// Returns the aligned coordinates.
 function assertAligned(result, segment, cadastre) {
   assert.ok(result, 'should align');
-  assert.deepStrictEqual(result[0], segment[0], 'the start node stays put');
-  assert.deepStrictEqual(result[result.length - 1], segment[segment.length - 1], 'the end node stays put');
-  for (const p of result.slice(1, -1)) {
+  const { coords } = result;
+  assert.deepStrictEqual(coords[0], segment[0], 'the start node stays put');
+  assert.deepStrictEqual(coords[coords.length - 1], segment[segment.length - 1], 'the end node stays put');
+  for (const p of coords.slice(1, -1)) {
     const d = Math.min(...cadastre.map(line => distanceToPolyline(p, line)));
     assert.ok(d < 0.01, `point ${toMetres(p).map(v => v.toFixed(1))} is ${d.toFixed(2)} m off the cadastre`);
   }
+  return coords;
 }
 
 // A winding forest road, and the same road in WME: 6 m off, with a node every 50 m.
@@ -47,8 +50,7 @@ const coarse = [];
 for (let i = 0; i <= 80; i += 10) coarse.push(at(i * 5, 25 * Math.sin(i / 8) + 6));
 
 test('a road a few metres off a winding cadastre line is moved onto it, ends unchanged', () => {
-  const result = align(coarse, [winding]);
-  assertAligned(result, coarse, [winding]);
+  const result = assertAligned(align(coarse, [winding]), coarse, [winding]);
   // And it really follows the bends: every cadastre vertex away from the ends is
   // within the simplification tolerance of the result.
   for (const p of winding.slice(4, -4)) {
@@ -60,8 +62,7 @@ test('a road a few metres off a winding cadastre line is moved onto it, ends unc
 test('a hairpin keeps its apex', () => {
   const hairpin = [at(0, 0), at(150, 0), at(0, 60)];
   const wme = [at(0, 5), at(140, 5), at(5, 55)];
-  const result = align(wme, [hairpin]);
-  assertAligned(result, wme, [hairpin]);
+  const result = assertAligned(align(wme, [hairpin]), wme, [hairpin]);
   assert.ok(result.some(p => p[0] === hairpin[1][0] && p[1] === hairpin[1][1]), 'the apex vertex is in the result');
 });
 
@@ -69,14 +70,12 @@ test('a segment running along two cadastre lines follows both, corner included',
   const first = [at(0, 0), at(100, 0)];
   const second = [at(100, 0), at(100, 100)];
   const wme = [at(0, 5), at(95, 5), at(95, 100)];
-  const result = align(wme, [first, second]);
-  assertAligned(result, wme, [first, second]);
+  const result = assertAligned(align(wme, [first, second]), wme, [first, second]);
   assert.ok(result.some(p => p[0] === first[1][0] && p[1] === first[1][1]), 'the junction corner is in the result');
 });
 
 test('a cadastre line drawn the other way is followed in the segment\'s direction', () => {
-  const result = align(coarse, [winding.slice().reverse()]);
-  assertAligned(result, coarse, [winding]);
+  const result = assertAligned(align(coarse, [winding.slice().reverse()]), coarse, [winding]);
   const xs = result.map(p => toMetres(p)[0]);
   for (let i = 1; i < xs.length; i++) assert.ok(xs[i] > xs[i - 1], 'points run west to east like the segment');
 });
@@ -91,11 +90,30 @@ test('a segment the cadastre doesn\'t follow at all is not aligned', () => {
   assert.strictEqual(align([at(0, 5), at(200, 5)], []), null);
 });
 
-test('a mismatch near the ends is tolerated', () => {
-  // Junctions are where WME and the cadastre disagree most.
+test('a mismatch near the ends still aligns, and says how far off each end is', () => {
+  // Junctions are where WME and the cadastre disagree most. The cadastre stops 10 m
+  // short of the start node, so that end is measured to where it stops.
   const cadastre = [at(10, 0), at(200, 0)];
   const wme = [at(0, 5), at(200, 5)];
-  assertAligned(align(wme, [cadastre]), wme, [cadastre]);
+  const result = align(wme, [cadastre]);
+  assertAligned(result, wme, [cadastre]);
+  const [a, b] = result.endOffsetsM;
+  assert.ok(Math.abs(a - Math.hypot(10, 5)) < 0.01, `start is ${a} m off`);
+  assert.ok(Math.abs(b - 5) < 0.01, `end is ${b} m off`);
+});
+
+test('an end is measured to the cadastre road it joins, not to whichever passes nearest', () => {
+  // The case from WME: the cadastre puts the junction 12 m east of the WME node, and
+  // its cross road runs right through that node. Aligning would leave a 12 m step at
+  // the start, which the cross road doesn't make any better.
+  const joined = [at(12, 8), at(12, -100)];
+  const crossRoad = [at(-60, 0), at(0, 0), at(12, 8)];
+  const wme = [at(0, 0), at(12, -30), at(12, -100)];
+  const result = align(wme, [joined, crossRoad]);
+  assertAligned(result, wme, [joined, crossRoad]);
+  const [a, b] = result.endOffsetsM;
+  assert.ok(Math.abs(a - 12) < 0.01, `start is ${a} m off`);
+  assert.ok(b < 0.01, `end is ${b} m off`);
 });
 
 test('a road between two carriageways stays on one of them', () => {
@@ -103,8 +121,7 @@ test('a road between two carriageways stays on one of them', () => {
   const south = [at(0, -6), at(100, -6), at(200, -6)];
   // Weaves across the middle, so the nearer carriageway keeps changing.
   const wme = [at(0, 1), at(50, -1), at(100, 1), at(150, -1), at(200, 1)];
-  const result = align(wme, [north, south]);
-  assertAligned(result, wme, [north, south]);
+  const result = assertAligned(align(wme, [north, south]), wme, [north, south]);
   const inner = result.slice(1, -1).map(p => Math.round(toMetres(p)[1]));
   assert.ok(inner.every(y => y === inner[0]), `zigzagged between carriageways: ${inner}`);
 });
@@ -115,8 +132,7 @@ test('a bend WME drew far off the cadastre is bridged by the cadastre itself', (
   // so the line's own geometry fills the gap.
   const cadastre = [at(0, 0), at(100, 0), at(100, 100)];
   const wme = [at(0, 5), at(60, 5), at(135, -35), at(105, 40), at(105, 100)];
-  const result = align(wme, [cadastre]);
-  assertAligned(result, wme, [cadastre]);
+  const result = assertAligned(align(wme, [cadastre]), wme, [cadastre]);
   assert.ok(result.some(p => p[0] === cadastre[1][0] && p[1] === cadastre[1][1]), 'the cadastre corner is in the result');
 });
 

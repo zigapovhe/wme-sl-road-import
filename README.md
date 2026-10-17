@@ -23,6 +23,7 @@ After installing the script, you'll see a new **SL-ROAD** tab in the left sideba
 | Grey dashed | A road you added since the last load |
 | Cyan | Every loaded cadastre road, when **Show already mapped roads** is on |
 | Green dashed | The preview of an aligned road (see [📐 Aligning an existing road](#-aligning-an-existing-road)) |
+| Red ring | An end of that road too far off the cadastre to align it |
 | Orange ring | A dead end next to a road it isn't connected to (see [🟠 Disconnected ends](#-disconnected-ends)) |
 
 Hovering a pink line shows its category, the road type a click would use, and its length. The sidebar counts how many roads are missing, already mapped and added.
@@ -69,6 +70,8 @@ To move an existing WME road onto the cadastre geometry, select one segment and 
 The segment's two end nodes never move, so its connections stay as they are. Only the points in between are replaced with the cadastre's, bends included. It works across cadastre junctions and whichever way the cadastre is drawn. Where WME drew a bend far off, the cadastre's own shape fills the gap.
 
 Nothing changes if the cadastre runs alongside less than half of the segment, misses its first or last 15 m, or would jump between cadastre roads that don't meet. If the segment has house numbers, check them afterwards. WME's undo reverts it.
+
+Nothing changes either when an end node is more than 3 m from the cadastre. The preview still shows, with a red ring on that end. Aligning would leave a bend right at the node and get the turn angles there wrong, while a road that is only shifted a little harms nobody.
 
 ---
 

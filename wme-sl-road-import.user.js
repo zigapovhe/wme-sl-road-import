@@ -50,6 +50,10 @@
   // Junctions are where WME and the cadastre disagree most, so aligning tolerates no
   // match this close to either end of the segment.
   const ALIGN_END_SKIP_M = 15;
+  // An end node further than this from the cadastre would leave the aligned road with
+  // a bend right at the node, and WME takes turn angles from there. A road that is
+  // only shifted harms nobody, so then it isn't aligned at all.
+  const ALIGN_MAX_END_OFFSET_M = 3;
   // Further than this, a dead end next to a road is more likely a real dead end than
   // a junction the editor missed.
   const DISCONNECTED_MAX_DISTANCE_M = 5;
@@ -614,10 +618,21 @@
     return out;
   }
 
+  // How far a projected point is from a projected cadastre line.
+  function distanceToLine(p, line) {
+    let best = Infinity;
+    for (let j = 1; j < line.pts.length; j++) {
+      best = Math.min(best, pointToSegmentDistance(p, line.pts[j - 1], line.pts[j]));
+    }
+    return best;
+  }
+
   // New geometry for a WME segment, moved onto the cadastre line(s) running alongside
-  // it. The two end points are the segment's own, so its nodes and connections stay
-  // where they are. null, since a half-aligned road is worse than none, whenever matchAlong or
-  // pathThrough gives up.
+  // it, as { coords, endOffsetsM }. The two end points are the segment's own, so its
+  // nodes and connections stay where they are. endOffsetsM says how far the start
+  // and end node are from the cadastre line the new geometry joins there: the length
+  // of the step it takes to get onto it. null, since a half-aligned road is worse than
+  // none, whenever matchAlong or pathThrough gives up.
   function alignToCadastre(segCoords, cadastreLines, stepM, maxDistM, endSkipM, toleranceM) {
     if (segCoords.length < 2) return null;
     const project = makeLocalProjection(segCoords[0]);
@@ -634,7 +649,11 @@
     const out = matches && pathThrough(segCoords, matches, maxDistM);
     if (!out) return null;
     const deduped = out.filter((p, k) => k === 0 || p[0] !== out[k - 1][0] || p[1] !== out[k - 1][1]);
-    return simplifyLine(deduped, toleranceM);
+    const endOffsetsM = [
+      distanceToLine(project(segCoords[0]), matches[0].line),
+      distanceToLine(project(segCoords[segCoords.length - 1]), matches[matches.length - 1].line)
+    ];
+    return { coords: simplifyLine(deduped, toleranceM), endOffsetsM };
   }
 
   // --- Loading from eProstor ---
@@ -803,6 +822,13 @@
       }
     },
     {
+      predicate: (p) => p.state === 'off-end',
+      style: {
+        pointRadius: 12, fill: false, strokeColor: '#ff1744', strokeWidth: 3, strokeOpacity: 0.95,
+        pointerEvents: 'none'
+      }
+    },
+    {
       predicate: (p) => p.state === 'imported',
       style: {
         strokeColor: '#888888', strokeWidth: 4, strokeOpacity: 0.5, strokeDashstyle: 'dash',
@@ -926,7 +952,7 @@
     const imported = new Map(); // id -> { lineId, coords } of segments added since the last load
     const roads = {
       lines, pieces, imported,
-      alignPreview: null, // { segmentId, original, coords, hasHouseNumbers } awaiting a second press
+      alignPreview: null, // { segmentId, original, coords, offEnds, hasHouseNumbers } awaiting a second press
       partial: false, // the last load hit the page cap or lost pages
       update, render, clear, show
     };
@@ -966,16 +992,18 @@
     }
 
     function render() {
-      const feature = (id, coords, state) => ({
-        type: 'Feature', id, geometry: { type: 'LineString', coordinates: coords }, properties: { state }
+      const feature = (id, coords, state, type = 'LineString') => ({
+        type: 'Feature', id, geometry: { type, coordinates: coords }, properties: { state }
       });
+      const preview = roads.alignPreview;
       // Reference lines first, so the pieces draw on top of them. They never go into
       // `pieces`, which is what keeps them unclickable.
       const features = [
         ...(showMapped ? [...lines.values()].map(l => feature(`ref-${l.id}`, l.coords, 'reference')) : []),
         ...[...pieces.values()].map(p => feature(p.id, p.coords, 'missing')),
         ...[...imported].map(([id, a]) => feature(id, a.coords, 'imported')),
-        ...(roads.alignPreview ? [feature('align-preview', roads.alignPreview.coords, 'preview')] : [])
+        ...(preview ? [feature('align-preview', preview.coords, 'preview')] : []),
+        ...(preview ? preview.offEnds.map(e => feature(`align-off-${e.name}`, e.coords, 'off-end', 'Point')) : [])
       ];
       layerIds = replaceFeatures(SDK_LAYER_NAME, layerIds, features);
     }
@@ -1197,7 +1225,8 @@
 
   // Align road geometry. The first press draws the selected segment moved onto the
   // cadastre, a second press on the same, unchanged segment applies it. Anything else
-  // starts over with a fresh preview.
+  // starts over with a fresh preview. An end node too far off the cadastre is ringed,
+  // and then a second press only says why again.
   function setupAligning(ui, roads) {
     function alignSelected() {
       const segmentId = selectedSegmentId();
@@ -1209,7 +1238,7 @@
       }
 
       const preview = roads.alignPreview;
-      if (preview && preview.segmentId === segmentId
+      if (preview && !preview.offEnds.length && preview.segmentId === segmentId
         && JSON.stringify(preview.original) === JSON.stringify(coords)) {
         applyAlign();
         return;
@@ -1227,14 +1256,25 @@
         toast('Couldn\'t match this segment to one loaded road, nothing to align it to', 'warning');
         return;
       }
+      // WME names a segment's start node A and its end node B.
+      const offEnds = [
+        { name: 'A', coords: coords[0], offsetM: aligned.endOffsetsM[0] },
+        { name: 'B', coords: coords[coords.length - 1], offsetM: aligned.endOffsetsM[1] }
+      ].filter(e => e.offsetM > ALIGN_MAX_END_OFFSET_M);
       roads.alignPreview = {
         segmentId,
         original: coords.map(p => p.slice()),
-        coords: aligned,
+        coords: aligned.coords,
+        offEnds,
         hasHouseNumbers: !!segment.hasHouseNumbers
       };
       roads.render();
-      toast(`Preview in green: ${aligned.length - 2} geometry nodes. Press Align again to apply.`, 'info');
+      if (offEnds.length) {
+        const where = offEnds.map(e => `${Math.round(e.offsetM)} m off at end ${e.name}`).join(' and ');
+        toast(`Cadastre is ${where}, aligning would bend the road there. Not aligning.`, 'warning');
+        return;
+      }
+      toast(`Preview in green: ${aligned.coords.length - 2} geometry nodes. Press Align again to apply.`, 'info');
     }
 
     function applyAlign() {
